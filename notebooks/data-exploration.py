@@ -145,13 +145,25 @@ for col in d_gt_labels.columns:
     print(f"{col} has the following values: {d_gt_labels[col].value_counts()}")
 
 # %%
-print(d_gt_labels.columns)
-
-# %%
 col = "HxType1"
 print(f"{col} has the following values: {d_gt_labels[col].value_counts()}")
 
 # %%
 print(d_gt.loc[195, "text"])
 
+
+# %%
+
+for col in d_gt_labels.columns[:6]:
+    print(col, "has", len(d_gt_labels[col].unique()), "unique fields")
+
+
+# %%
+d_gt_labels["Manufacturer1"].unique()
+
+
+# %%
+
+
+# %%
 # %%
