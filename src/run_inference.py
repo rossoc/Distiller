@@ -71,7 +71,16 @@ def load_model(model_path: str, device: str = "cpu") -> Decoder:
         num_heads=config.get("num_heads", 8),
         dropout=config.get("dropout", 0.1),
     )
-    model.load_state_dict(checkpoint["model_state_dict"])
+    
+    # Load state dict - handle both Lightning-wrapped and plain Decoder checkpoints
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+    
+    # If keys are prefixed with "model.", strip the prefix (Lightning format)
+    if any(key.startswith("model.") for key in state_dict.keys()):
+        print("Detected Lightning checkpoint, stripping 'model.' prefix...")
+        state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+    
+    model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
     
