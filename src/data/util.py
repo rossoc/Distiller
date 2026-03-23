@@ -1,10 +1,7 @@
 from dotenv import load_dotenv
 from os import getenv
 import pandas as pd
-
-import random
 import numpy as np
-import torch
 
 
 from typing import Tuple
@@ -84,18 +81,8 @@ def split_dataset(X, y, train_ratio, eval_ratio):
     return ((X_train, y_train), (X_eval, y_eval), (X_test, y_test))
 
 
-def set_seed(seed: int):
-    """Set seed to make every experiment repeatable"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
 def load_dataset(
-    dataset_variation: Datasets_Variations, split_ratio: Tuple[int, int, int]
+    dataset_variation: Datasets_Variations, split_ratio: Tuple[float, float, float]
 ):
     if dataset_variation not in Datasets_Variations:
         raise ValueError(f"""Wrong value for dataset_name, expected one of

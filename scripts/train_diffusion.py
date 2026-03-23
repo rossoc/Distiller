@@ -26,7 +26,8 @@ from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
 from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
-from util.logger import create_output_folder, save_training_config
+from util.logger import save_training_config
+from util.randomness import setup_run
 
 
 def parse_args():
@@ -162,15 +163,8 @@ def parse_args():
 def main():
     args = parse_args()
 
-    # Set seed for reproducibility
-    L.seed_everything(args.seed)
-
-    # Create output folder
-    run_path = create_output_folder(args.output_dir, args.run_name)
-    print(f"\n{'=' * 60}")
-    print(f"Training run: {run_path.name}")
-    print(f"Output folder: {run_path.absolute()}")
-    print(f"{'=' * 60}\n")
+    # Setup the run
+    run_path = setup_run(args)
 
     # Create data module
     print("Initializing data module...")
