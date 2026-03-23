@@ -5,14 +5,11 @@ Handles pre-computing embeddings for training data and creating
 PyTorch datasets for efficient training.
 """
 
-from tqdm import trange
+from tqdm.auto import trange
 import torch
 from torch.utils.data import Dataset
-from typing import List, Tuple, Dict, Any
+from typing import List, Dict, Any
 import numpy as np
-
-from .util import load_dataset, Datasets_Variations
-from model.encoder import gemma_encoder
 
 
 class EmbeddingDecoderDataset(Dataset):
@@ -62,7 +59,8 @@ class EmbeddingDecoderDataset(Dataset):
         all_embeddings = []
 
         # Process in chunks of batch_size
-        for i in range(0, len(texts), self.batch_size):
+        pbar = trange(0, len(texts), self.batch_size, leave=True)
+        for i in pbar:
             batch = texts[i : i + self.batch_size]
 
             try:
@@ -153,62 +151,6 @@ def embedding_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         "target_text": [sample["target_text"] for sample in batch],
         "input_text": [sample["input_text"] for sample in batch],
     }
-
-
-def create_datasets(
-    train_ratio: float = 0.5,
-    eval_ratio: float = 0.1,
-    test_ratio: float = 0.4,
-    dataset_variation: Datasets_Variations = Datasets_Variations.SIMPLE_DIFFUSION,
-    max_length: int = 512,
-) -> Tuple[EmbeddingDecoderDataset, EmbeddingDecoderDataset, EmbeddingDecoderDataset]:
-    """
-    Create train, eval, and test datasets.
-
-    Args:
-        train_ratio: Ratio of data for training
-        eval_ratio: Ratio of data for evaluation
-        test_ratio: Ratio of data for testing
-        dataset_variation: Which dataset variation to use
-        max_length: Maximum sequence length
-
-    Returns:
-        train_dataset, eval_dataset, test_dataset
-    """
-    # Load and split data
-    (X_train, y_train), (X_eval, y_eval), (X_test, y_test) = load_dataset(
-        dataset_variation=dataset_variation,
-        split_ratio=(train_ratio, eval_ratio, test_ratio),
-    )
-
-    # Convert to lists
-    X_train_list = X_train.tolist()
-    y_train_list = y_train.tolist()
-    X_eval_list = X_eval.tolist()
-    y_eval_list = y_eval.tolist()
-    X_test_list = X_test.tolist()
-    y_test_list = y_test.tolist()
-
-    # Create encoder
-    encoder = gemma_encoder()
-
-    # Create datasets
-    print("\nCreating training dataset...")
-    train_dataset = EmbeddingDecoderDataset(
-        X_train_list, y_train_list, encoder, max_length
-    )
-
-    print("\nCreating evaluation dataset...")
-    eval_dataset = EmbeddingDecoderDataset(
-        X_eval_list, y_eval_list, encoder, max_length
-    )
-
-    print("\nCreating test dataset...")
-    test_dataset = EmbeddingDecoderDataset(
-        X_test_list, y_test_list, encoder, max_length
-    )
-
-    return train_dataset, eval_dataset, test_dataset
 
 
 def build_faiss_index_from_dataset(

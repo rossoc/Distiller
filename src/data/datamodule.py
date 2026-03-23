@@ -6,12 +6,16 @@ from typing import Optional
 from torch.utils.data import DataLoader
 import lightning as L
 
+from .util import (
+    load_dataset,
+)
+
+from model.encoder import gemma_encoder
 from .dataset import (
-    create_datasets,
     EmbeddingDecoderDataset,
     embedding_collate_fn,
 )
-from data.util import Datasets_Variations
+
 from util.randomness import set_seed
 
 
@@ -27,7 +31,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         train_ratio: float = 0.5,
         eval_ratio: float = 0.1,
         test_ratio: float = 0.4,
-        dataset_variation: Datasets_Variations = Datasets_Variations.SIMPLE_DIFFUSION,
+        schema: str = "simple_diffusion",
         max_length: int = 512,
         batch_size: int = 32,
         num_workers: int = 0,
@@ -51,13 +55,17 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         self.train_ratio = train_ratio
         self.eval_ratio = eval_ratio
         self.test_ratio = test_ratio
-        self.dataset_variation = dataset_variation
+        self.data_schema = schema
         self.max_length = max_length
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.seed = seed
 
         # Datasets will be created in setup()
+        self.encoder = gemma_encoder()
+        self.train_data = None
+        self.eval_data = None
+        self.test_data = None
         self.train_dataset: EmbeddingDecoderDataset = None
         self.eval_dataset: EmbeddingDecoderDataset = None
         self.test_dataset: EmbeddingDecoderDataset = None
@@ -73,31 +81,23 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         Args:
             stage: Either 'fit', 'validate', 'test', or 'predict'
         """
-
-        if self._dataset_created:
-            return
-
-        # Set seed for reproducibility
         set_seed(self.seed)
 
-        # Create datasets
-        self.train_dataset, self.eval_dataset, self.test_dataset = create_datasets(
-            train_ratio=self.train_ratio,
-            eval_ratio=self.eval_ratio,
-            test_ratio=self.test_ratio,
-            dataset_variation=self.dataset_variation,
-            max_length=self.max_length,
+        # load_dataset returns ((X_train, y_train), (X_eval, y_eval), (X_test, y_test))
+        self.train_data, self.eval_data, self.test_data = load_dataset(
+            (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
         )
-
-        print("DataModule setup complete:")
-        print(f"  Train samples: {len(self.train_dataset)}")
-        print(f"  Eval samples: {len(self.eval_dataset)}")
-        print(f"  Test samples: {len(self.test_dataset)}")
 
     def train_dataloader(self) -> DataLoader:
         """Return the training dataloader."""
+        X_train, y_train = self.train_data
+
+        dataset = EmbeddingDecoderDataset(
+            X_train, y_train, self.encoder, self.max_length
+        )
+
         return DataLoader(
-            self.train_dataset,
+            dataset,
             batch_size=self.batch_size,
             shuffle=True,
             num_workers=self.num_workers,
@@ -107,8 +107,12 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         """Return the validation dataloader."""
+        X_eval, y_eval = self.eval_data
+
+        dataset = EmbeddingDecoderDataset(X_eval, y_eval, self.encoder, self.max_length)
+
         return DataLoader(
-            self.eval_dataset,
+            dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -118,8 +122,12 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
 
     def test_dataloader(self) -> DataLoader:
         """Return the test dataloader."""
+        X_test, y_test = self.test_data
+
+        dataset = EmbeddingDecoderDataset(X_test, y_test, self.encoder, self.max_length)
+
         return DataLoader(
-            self.test_dataset,
+            dataset,
             batch_size=self.batch_size,
             shuffle=False,
             num_workers=self.num_workers,
@@ -133,9 +141,9 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             "train_ratio": self.train_ratio,
             "eval_ratio": self.eval_ratio,
             "test_ratio": self.test_ratio,
-            "dataset_variation": self.dataset_variation.name,
+            "data_schema": self.data_schema,
             "max_length": self.max_length,
-            "train_samples": len(self.train_dataset) if self.train_dataset else 0,
-            "eval_samples": len(self.eval_dataset) if self.eval_dataset else 0,
-            "test_samples": len(self.test_dataset) if self.test_dataset else 0,
+            "train_samples": len(self.train_data[0]) if self.train_data else 0,
+            "eval_samples": len(self.eval_data[0]) if self.eval_data else 0,
+            "test_samples": len(self.test_data[0]) if self.test_data else 0,
         }

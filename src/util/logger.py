@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import argparse
 import json
+import yaml
 
 
 def create_output_folder(output_dir: str, run_name: Optional[str] = None) -> Path:
@@ -79,3 +80,20 @@ def save_training_config(run_path: Path, args: argparse.Namespace, data_info: di
         json.dump(config, f, indent=2)
 
     print(f"Training config saved to: {config_path}")
+
+
+def write_data_config(key, value, config):
+    with open(config, "r") as file:
+        settings = yaml.safe_load(file)
+
+    settings[key] = value
+
+    with open(config, "w") as file:
+        yaml.safe_dump(settings, file)
+
+
+def read_data_config(config):
+    with open(config, "r") as file:
+        settings = yaml.safe_load(file)
+
+    return settings
