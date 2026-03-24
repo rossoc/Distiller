@@ -23,15 +23,19 @@ Output:
         ├── best_model.pt
         ├── training_config.json
         └── lightning_logs/
+
+Note:
+    WandB runs are saved in offline mode by default for parallel execution compatibility.
+    To sync runs to wandb.ai after optimization:
+        wandb sync outputs/optuna/study_*/trial_*/wandb
 """
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 # Add src directory to path for imports when running as script
 if __name__ == "__main__":
@@ -55,7 +59,7 @@ from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
 from util.logger import save_training_config
-from util.randomness import setup_run
+from util.randomness import set_seed
 
 
 def parse_args():
@@ -266,7 +270,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def suggest_hyperparameters(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, Any]:
+def suggest_hyperparameters(
+    trial: optuna.Trial, args: argparse.Namespace
+) -> Dict[str, Any]:
     """
     Suggest hyperparameters for a trial.
 
@@ -319,6 +325,7 @@ def run_trial(
     # Set up random seed for this trial
     trial_seed = args.seed + trial.number
     args.seed = trial_seed
+    set_seed(args.seed)
 
     # Setup the run path
     run_path = trial_dir
@@ -368,9 +375,7 @@ def run_trial(
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
 
     # Pruning callback
-    pruning_callback = PyTorchLightningPruningCallback(
-        trial=trial, monitor="val_loss"
-    )
+    pruning_callback = PyTorchLightningPruningCallback(trial=trial, monitor="val_loss")
 
     callbacks = [checkpoint_callback, best_model_callback, pruning_callback]
 
@@ -392,7 +397,11 @@ def run_trial(
 
     # Setup logger
     if not args.disable_wandb:
+        import os
         import wandb
+
+        # Set offline mode for parallel execution compatibility
+        os.environ["WANDB_MODE"] = "offline"
 
         wandb_run = wandb.init(
             project="embedding-decoder-optuna",
@@ -478,23 +487,45 @@ def save_study_results(study: optuna.Study, output_dir: Path):
     all_trials = []
     for trial in study.trials:
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            all_trials.append({
-                "number": trial.number,
-                "value": trial.value,
-                "params": trial.params,
-                "datetime": trial.datetime_complete.isoformat() if trial.datetime_complete else None,
-            })
+            all_trials.append(
+                {
+                    "number": trial.number,
+                    "value": trial.value,
+                    "params": trial.params,
+                    "datetime": trial.datetime_complete.isoformat()
+                    if trial.datetime_complete
+                    else None,
+                }
+            )
 
     with open(output_dir / "study_results.json", "w") as f:
-        json.dump({
-            "study_name": study.study_name,
-            "n_trials": len(study.trials),
-            "n_complete": len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
-            "n_pruned": len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]),
-            "n_failed": len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]),
-            "best_trial": best_trial_data,
-            "all_trials": all_trials,
-        }, f, indent=2)
+        json.dump(
+            {
+                "study_name": study.study_name,
+                "n_trials": len(study.trials),
+                "n_complete": len(
+                    [
+                        t
+                        for t in study.trials
+                        if t.state == optuna.trial.TrialState.COMPLETE
+                    ]
+                ),
+                "n_pruned": len(
+                    [
+                        t
+                        for t in study.trials
+                        if t.state == optuna.trial.TrialState.PRUNED
+                    ]
+                ),
+                "n_failed": len(
+                    [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+                ),
+                "best_trial": best_trial_data,
+                "all_trials": all_trials,
+            },
+            f,
+            indent=2,
+        )
 
     # Create visualizations
     try:
@@ -583,11 +614,19 @@ def main():
     print("Optimization Complete!")
     print(f"{'=' * 60}")
     print(f"Number of finished trials: {len(study.trials)}")
-    print(f"Number of complete trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}")
-    print(f"Number of pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}")
-    print(f"Number of failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}")
+    print(
+        f"Number of complete trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}"
+    )
+    print(
+        f"Number of pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}"
+    )
+    print(
+        f"Number of failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}"
+    )
 
-    if study.trials and any(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials):
+    if study.trials and any(
+        t.state == optuna.trial.TrialState.COMPLETE for t in study.trials
+    ):
         print(f"\nBest trial: {study.best_trial.number}")
         print(f"Best validation loss: {study.best_value:.4f}")
         print("\nBest hyperparameters:")
