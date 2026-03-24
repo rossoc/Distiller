@@ -20,7 +20,7 @@ import argparse
 import json
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
 from model.diffusion import EmbeddingDecoderLightning
@@ -145,16 +145,38 @@ def parse_args():
     parser.add_argument(
         "--min_steps", type=int, default=None, help="Minimum number of steps to train"
     )
+    parser.add_argument(
+        "--progress_bar_refresh_rate",
+        type=int,
+        default=100,
+        help="Update progress bar every N batches (default: 100)",
+    )
+    parser.add_argument(
+        "--disable_progress_bar",
+        action="store_true",
+        help="Disable progress bar entirely",
+    )
+    parser.add_argument(
+        "--save_last_checkpoint",
+        action="store_true",
+        help="Save last.ckpt every epoch (default: False for performance)",
+    )
 
     # Logging arguments
     parser.add_argument(
-        "--log_every_n_steps", type=int, default=10, help="Log every N steps"
+        "--log_every_n_steps", type=int, default=50, help="Log every N steps"
     )
     parser.add_argument(
         "--val_check_interval",
         type=float,
         default=1.0,
         help="Validation check interval (1.0 = every epoch)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="Number of workers for data loading (default: 4)",
     )
 
     return parser.parse_args()
@@ -174,7 +196,7 @@ def main():
         test_ratio=args.test_ratio,
         max_length=args.max_length,
         batch_size=args.batch_size,
-        num_workers=0,  # Set to >0 for faster data loading on Linux
+        num_workers=args.num_workers,
         seed=args.seed,
     )
 
@@ -199,7 +221,7 @@ def main():
         monitor="val_loss",
         mode="min",
         save_top_k=3,
-        save_last=True,
+        save_last=args.save_last_checkpoint,
     )
 
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
@@ -214,6 +236,13 @@ def main():
             verbose=True,
         )
         callbacks.append(early_stopping_callback)
+
+    # Add progress bar callback with configurable refresh rate
+    if not args.disable_progress_bar:
+        progress_bar_callback = RichProgressBar(
+            refresh_rate=args.progress_bar_refresh_rate
+        )
+        callbacks.append(progress_bar_callback)
 
     # Setup logger
     logger = WandbLogger(
@@ -236,7 +265,7 @@ def main():
         callbacks=callbacks,
         logger=logger,
         enable_checkpointing=True,
-        enable_progress_bar=True,
+        enable_progress_bar=not args.disable_progress_bar,
         enable_model_summary=True,
     )
 
