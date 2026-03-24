@@ -49,7 +49,7 @@ from optuna.visualization import (
 )
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
 
 from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
@@ -225,16 +225,34 @@ def parse_args():
         default=5,
         help="Patience for Optuna pruning (epochs without improvement)",
     )
+    parser.add_argument(
+        "--progress_bar_refresh_rate",
+        type=int,
+        default=100,
+        help="Update progress bar every N batches (default: 100)",
+    )
+    parser.add_argument(
+        "--disable_progress_bar",
+        action="store_true",
+        default=True,
+        help="Disable progress bar entirely (default: True for Optuna)",
+    )
 
     # Logging arguments
     parser.add_argument(
-        "--log_every_n_steps", type=int, default=10, help="Log every N steps"
+        "--log_every_n_steps", type=int, default=50, help="Log every N steps"
     )
     parser.add_argument(
         "--val_check_interval",
         type=float,
         default=1.0,
         help="Validation check interval (1.0 = every epoch)",
+    )
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+        help="Number of workers for data loading (default: 4)",
     )
     parser.add_argument(
         "--disable_wandb",
@@ -257,10 +275,10 @@ def suggest_hyperparameters(trial: optuna.Trial, args: argparse.Namespace) -> Di
         Dictionary of hyperparameters
     """
     return {
-        "num_heads": trial.choice("num_heads", args.num_heads_choices),
-        "num_layers": trial.choice("num_layers", args.num_layers_choices),
-        "fwd_dim": trial.choice("fwd_dim", args.fwd_dim_choices),
-        "learning_rate": trial.float(
+        "num_heads": trial.suggest_categorical("num_heads", args.num_heads_choices),
+        "num_layers": trial.suggest_categorical("num_layers", args.num_layers_choices),
+        "fwd_dim": trial.suggest_categorical("fwd_dim", args.fwd_dim_choices),
+        "learning_rate": trial.suggest_float(
             "learning_rate", args.lr_min, args.lr_max, log=True
         ),
     }
@@ -311,7 +329,7 @@ def run_trial(
         test_ratio=args.test_ratio,
         max_length=args.max_length,
         batch_size=args.batch_size,
-        num_workers=0,
+        num_workers=args.num_workers,
         seed=trial_seed,
     )
 
@@ -356,6 +374,13 @@ def run_trial(
         )
         callbacks.append(early_stopping_callback)
 
+    # Add progress bar callback with configurable refresh rate
+    if not args.disable_progress_bar:
+        progress_bar_callback = RichProgressBar(
+            refresh_rate=args.progress_bar_refresh_rate
+        )
+        callbacks.append(progress_bar_callback)
+
     # Setup logger
     if not args.disable_wandb:
         import wandb
@@ -384,8 +409,8 @@ def run_trial(
         callbacks=callbacks,
         logger=logger,
         enable_checkpointing=True,
-        enable_progress_bar=False,  # Disable for cleaner optuna output
-        enable_model_summary=False,
+        enable_progress_bar=not args.disable_progress_bar,
+        enable_model_summary=not args.disable_progress_bar,
     )
 
     # Setup data and save config
