@@ -46,20 +46,16 @@ class EmbeddingDecoderDataset(Dataset):
         self.batch_size = batch_size
 
         # Pre-compute all embeddings
-        print("Pre-computing input embeddings...")
-        self.input_embeddings = self._encode_texts(X_texts)
-
-        print("Pre-computing target embeddings...")
-        self.target_embeddings = self._encode_texts(y_texts)
-
+        self.input_embeddings = self._encode_texts(X_texts, "Input")
+        self.target_embeddings = self._encode_texts(y_texts, "Target")
         print(f"Dataset ready with {len(self)} samples")
 
-    def _encode_texts(self, texts: List[str]) -> List[np.ndarray]:
+    def _encode_texts(self, texts: List[str], is_input: str) -> List[np.ndarray]:
         """Encode texts in batches for better performance."""
         all_embeddings = []
 
         # Process in chunks of batch_size
-        pbar = trange(0, len(texts), self.batch_size, leave=True)
+        pbar = trange(0, len(texts), self.batch_size, leave=True, desc=is_input)
         for i in pbar:
             batch = texts[i : i + self.batch_size]
 

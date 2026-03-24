@@ -83,7 +83,6 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         """
         set_seed(self.seed)
 
-        # load_dataset returns ((X_train, y_train), (X_eval, y_eval), (X_test, y_test))
         self.train_data, self.eval_data, self.test_data = load_dataset(
             (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
         )

@@ -21,7 +21,7 @@ import json
 
 import lightning as L
 from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping
-from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger
+from lightning.pytorch.loggers import WandbLogger
 
 from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
@@ -215,19 +215,13 @@ def main():
         )
         callbacks.append(early_stopping_callback)
 
-    # Setup logger (use CSVLogger as default, TensorBoard if available)
-    try:
-        logger = TensorBoardLogger(
-            save_dir=str(run_path),
-            name="lightning_logs",
-        )
-        print("Using TensorBoard logger")
-    except ModuleNotFoundError:
-        logger = CSVLogger(
-            save_dir=str(run_path),
-            name="csv_logs",
-        )
-        print("TensorBoard not available, using CSV logger")
+    # Setup logger
+    logger = WandbLogger(
+        save_dir=str(run_path),
+        name=args.run_name or "decoder",
+        project="embedding-decoder",
+    )
+    print("Using Wandb logger")
 
     # Create trainer
     trainer = L.Trainer(
