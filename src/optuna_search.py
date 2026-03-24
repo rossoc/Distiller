@@ -454,20 +454,27 @@ def run_trial(
     with open(run_path / "trial_config.json", "w") as f:
         json.dump(trial_config, f, indent=2)
 
-    # Train
-    trainer.fit(model, datamodule=datamodule)
+    try:
+        # Train
+        trainer.fit(model, datamodule=datamodule)
 
-    # Get the best validation loss
-    best_val_loss = trainer.callback_metrics.get("val_loss", float("inf")).item()
+        # Get the best validation loss
+        best_val_loss = trainer.callback_metrics.get("val_loss", float("inf")).item()
 
-    # Report back to Optuna
-    trial.report(best_val_loss, trainer.current_epoch)
+        # Report back to Optuna
+        trial.report(best_val_loss, trainer.current_epoch)
 
-    # Handle pruning based on the intermediate value
-    if trial.should_prune():
-        raise optuna.TrialPruned()
+        # Handle pruning based on the intermediate value
+        if trial.should_prune():
+            raise optuna.TrialPruned()
 
-    return best_val_loss
+        return best_val_loss
+    finally:
+        # Clean up WandB run to prevent issues with subsequent trials
+        if not args.disable_wandb:
+            import wandb
+            if wandb.run is not None:
+                wandb.finish()
 
 
 def save_study_results(study: optuna.Study, output_dir: Path):
