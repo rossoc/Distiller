@@ -100,21 +100,21 @@ def parse_args():
         "--num_heads_choices",
         type=int,
         nargs="+",
-        default=[4, 8, 12, 16],
+        default=[8, 16, 32, 64],
         help="Choices for num_heads (default: 4 8 12 16)",
     )
     parser.add_argument(
         "--num_layers_choices",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8],
+        default=[2, 4, 8, 16],
         help="Choices for num_layers (default: 2 4 6 8)",
     )
     parser.add_argument(
         "--fwd_dim_choices",
         type=int,
         nargs="+",
-        default=[1024, 2048, 3072, 4096],
+        default=[1024, 516, 2048, 4096],
         help="Choices for fwd_dim (default: 1024 2048 3072 4096)",
     )
     parser.add_argument(
@@ -142,7 +142,7 @@ def parse_args():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=512,
+        default=2048,
         help="Maximum sequence length for embeddings",
     )
     parser.add_argument(
