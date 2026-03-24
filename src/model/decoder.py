@@ -21,6 +21,8 @@ class Decoder(nn.Module):
         fwd_dim: int = 2048,
         num_heads: int = 8,
         dropout: float = 0.1,
+        use_layer_norm: bool = True,
+        use_residual_scale: bool = False,
     ):
         """
         Initialize the decoder.
@@ -32,10 +34,14 @@ class Decoder(nn.Module):
             fwd_dim: Feed-forward dimension
             num_heads: Number of attention heads
             dropout: Dropout rate
+            use_layer_norm: Whether to apply pre-normalization
+            use_residual_scale: Whether to use residual scaling for deeper networks
         """
         super().__init__()
 
         self.emb_dim = emb_dim
+        self.num_layers = num_layers
+        self.use_residual_scale = use_residual_scale
 
         # Transformer decoder
         decoder_layer = nn.TransformerDecoderLayer(
@@ -45,10 +51,18 @@ class Decoder(nn.Module):
             dropout=dropout,
             activation="gelu",
             batch_first=True,
+            norm_first=use_layer_norm,  # Pre-norm for better stability
         )
         self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
 
-        # Output projection
+        # Residual scaling factors for deep networks
+        if use_residual_scale:
+            self.layer_scales = nn.Parameter(torch.ones(num_layers))
+        else:
+            self.register_buffer("layer_scales", torch.ones(num_layers))
+
+        # Output projection with layer norm
+        self.output_norm = nn.LayerNorm(emb_dim)
         self.output = nn.Linear(emb_dim, output_dim)
 
         # Initialize weights
@@ -101,6 +115,7 @@ class Decoder(nn.Module):
                 tgt_key_padding_mask=tgt_key_padding_mask,
                 memory_key_padding_mask=memory_key_padding_mask,
             )
+            x = self.output_norm(x)
             return self.output(x)
 
         # Teacher forcing mode (training)
@@ -111,6 +126,7 @@ class Decoder(nn.Module):
             memory_key_padding_mask=memory_key_padding_mask,
         )
 
+        x = self.output_norm(x)
         return self.output(x)
 
     @torch.no_grad()

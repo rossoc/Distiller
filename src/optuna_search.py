@@ -32,15 +32,9 @@ Note:
 
 import argparse
 import json
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
-
-# Add src directory to path for imports when running as script
-if __name__ == "__main__":
-    script_dir = Path(__file__).parent.absolute()
-    sys.path.insert(0, str(script_dir))
 
 import optuna
 from optuna.pruners import MedianPruner
@@ -111,8 +105,8 @@ def parse_args():
         "--num_layers_choices",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8],
-        help="Choices for num_layers (default: 2 4 6 8)",
+        default=[4, 6, 8, 12],
+        help="Choices for num_layers (default: 4 6 8 12)",
     )
     parser.add_argument(
         "--fwd_dim_choices",
@@ -124,14 +118,35 @@ def parse_args():
     parser.add_argument(
         "--lr_min",
         type=float,
-        default=1e-5,
-        help="Minimum learning rate for log-uniform search (default: 1e-5)",
+        default=5e-5,
+        help="Minimum learning rate for log-uniform search (default: 5e-5)",
     )
     parser.add_argument(
         "--lr_max",
         type=float,
-        default=1e-3,
-        help="Maximum learning rate for log-uniform search (default: 1e-3)",
+        default=5e-4,
+        help="Maximum learning rate for log-uniform search (default: 5e-4)",
+    )
+    parser.add_argument(
+        "--dropout_choices",
+        type=float,
+        nargs="+",
+        default=[0.05, 0.1, 0.15, 0.2],
+        help="Choices for dropout (default: 0.05 0.1 0.15 0.2)",
+    )
+    parser.add_argument(
+        "--loss_alpha_choices",
+        type=float,
+        nargs="+",
+        default=[0.3, 0.5, 0.7],
+        help="Choices for loss_alpha (default: 0.3 0.5 0.7)",
+    )
+    parser.add_argument(
+        "--label_smoothing_choices",
+        type=float,
+        nargs="+",
+        default=[0.0, 0.01, 0.05],
+        help="Choices for label_smoothing (default: 0.0 0.01 0.05)",
     )
 
     # Output arguments
@@ -164,6 +179,9 @@ def parse_args():
         "--emb_dim", type=int, default=768, help="Model embedding dimension"
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
+    parser.add_argument(
+        "--use_layer_norm", action="store_true", default=True, help="Use pre-normalization"
+    )
 
     # Training arguments
     parser.add_argument(
@@ -178,6 +196,24 @@ def parse_args():
         type=float,
         default=0.5,
         help="Weight for MSE loss in combined loss",
+    )
+    parser.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.0,
+        help="Label smoothing factor",
+    )
+    parser.add_argument(
+        "--gradient_clip_val",
+        type=float,
+        default=1.0,
+        help="Gradient clipping value",
+    )
+    parser.add_argument(
+        "--use_warmup", action="store_true", default=True, help="Use LR warmup"
+    )
+    parser.add_argument(
+        "--warmup_epochs", type=int, default=5, help="Number of warmup epochs"
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
@@ -290,6 +326,11 @@ def suggest_hyperparameters(
         "learning_rate": trial.suggest_float(
             "learning_rate", args.lr_min, args.lr_max, log=True
         ),
+        "dropout": trial.suggest_categorical("dropout", args.dropout_choices),
+        "loss_alpha": trial.suggest_categorical("loss_alpha", args.loss_alpha_choices),
+        "label_smoothing": trial.suggest_categorical(
+            "label_smoothing", args.label_smoothing_choices
+        ),
     }
 
 
@@ -350,10 +391,15 @@ def run_trial(
         num_layers=hparams["num_layers"],
         fwd_dim=hparams["fwd_dim"],
         num_heads=hparams["num_heads"],
-        dropout=args.dropout,
+        dropout=hparams["dropout"],
         learning_rate=hparams["learning_rate"],
         weight_decay=args.weight_decay,
-        loss_alpha=args.loss_alpha,
+        loss_alpha=hparams["loss_alpha"],
+        label_smoothing=hparams["label_smoothing"],
+        gradient_clip_val=args.gradient_clip_val,
+        use_warmup=args.use_warmup,
+        warmup_epochs=args.warmup_epochs,
+        use_layer_norm=args.use_layer_norm,
     )
 
     # Set hyperparameters on args for save_training_config
@@ -361,6 +407,9 @@ def run_trial(
     args.fwd_dim = hparams["fwd_dim"]
     args.num_heads = hparams["num_heads"]
     args.learning_rate = hparams["learning_rate"]
+    args.dropout = hparams["dropout"]
+    args.loss_alpha = hparams["loss_alpha"]
+    args.label_smoothing = hparams["label_smoothing"]
 
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
@@ -473,6 +522,7 @@ def run_trial(
         # Clean up WandB run to prevent issues with subsequent trials
         if not args.disable_wandb:
             import wandb
+
             if wandb.run is not None:
                 wandb.finish()
 

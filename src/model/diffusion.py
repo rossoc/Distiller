@@ -27,6 +27,11 @@ class EmbeddingDecoderLightning(L.LightningModule):
         learning_rate: float = 1e-4,
         weight_decay: float = 0.01,
         loss_alpha: float = 0.5,
+        label_smoothing: float = 0.0,
+        gradient_clip_val: float = 1.0,
+        use_warmup: bool = True,
+        warmup_epochs: int = 5,
+        use_layer_norm: bool = True,
     ):
         """
         Initialize the Lightning module.
@@ -41,6 +46,11 @@ class EmbeddingDecoderLightning(L.LightningModule):
             learning_rate: Learning rate for optimizer
             weight_decay: Weight decay for optimizer
             loss_alpha: Weight for MSE loss in combined loss (1-alpha for cosine)
+            label_smoothing: Label smoothing factor for regularization
+            gradient_clip_val: Gradient clipping value (disabled if <= 0)
+            use_warmup: Whether to use learning rate warmup
+            warmup_epochs: Number of warmup epochs
+            use_layer_norm: Whether to use pre-normalization in decoder
         """
         super().__init__()
         self.save_hyperparameters()
@@ -53,10 +63,11 @@ class EmbeddingDecoderLightning(L.LightningModule):
             fwd_dim=fwd_dim,
             num_heads=num_heads,
             dropout=dropout,
+            use_layer_norm=use_layer_norm,
         )
 
         # Loss function
-        self.criterion = EmbeddingDecoderLoss(alpha=loss_alpha)
+        self.criterion = EmbeddingDecoderLoss(alpha=loss_alpha, label_smoothing=label_smoothing)
 
         # For tracking best validation loss
         self.best_val_loss = float("inf")
@@ -90,10 +101,29 @@ class EmbeddingDecoderLightning(L.LightningModule):
         # Compute loss
         loss = self.criterion(predicted_embeddings, target_embeddings, tgt_padding_mask)
 
+        # Compute additional metrics for monitoring
+        with torch.no_grad():
+            # Cosine similarity metric
+            pred_norm = torch.norm(predicted_embeddings, p=2, dim=-1)
+            tgt_norm = torch.norm(target_embeddings, p=2, dim=-1)
+            cosine_sim = (predicted_embeddings * target_embeddings).sum(dim=-1) / (
+                pred_norm * tgt_norm + 1e-8
+            )
+            if tgt_padding_mask is not None:
+                cosine_sim = cosine_sim * (~tgt_padding_mask)
+                avg_cosine_sim = cosine_sim.sum() / (~tgt_padding_mask).sum()
+            else:
+                avg_cosine_sim = cosine_sim.mean()
+
+            # MSE metric
+            mse = ((predicted_embeddings - target_embeddings) ** 2).mean()
+
         # Log metrics
         self.log(
             "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True
         )
+        self.log("train_cosine_sim", avg_cosine_sim, on_epoch=True, logger=True)
+        self.log("train_mse", mse, on_epoch=True, logger=True)
 
         return loss
 
@@ -117,6 +147,20 @@ class EmbeddingDecoderLightning(L.LightningModule):
             predicted_embeddings, target_embeddings, tgt_padding_mask
         )
 
+        # Compute additional metrics
+        with torch.no_grad():
+            # Cosine similarity metric
+            pred_norm = torch.norm(predicted_embeddings, p=2, dim=-1)
+            tgt_norm = torch.norm(target_embeddings, p=2, dim=-1)
+            cosine_sim = (predicted_embeddings * target_embeddings).sum(dim=-1) / (
+                pred_norm * tgt_norm + 1e-8
+            )
+            if tgt_padding_mask is not None:
+                cosine_sim = cosine_sim * (~tgt_padding_mask)
+                avg_cosine_sim = cosine_sim.sum() / (~tgt_padding_mask).sum()
+            else:
+                avg_cosine_sim = cosine_sim.mean()
+
         # Log metrics
         self.log(
             "val_loss",
@@ -126,6 +170,7 @@ class EmbeddingDecoderLightning(L.LightningModule):
             prog_bar=True,
             logger=True,
         )
+        self.log("val_cosine_sim", avg_cosine_sim, on_epoch=True, logger=True)
 
         return val_loss
 
@@ -155,28 +200,53 @@ class EmbeddingDecoderLightning(L.LightningModule):
         return test_loss
 
     def configure_optimizers(self):
-        """Configure optimizer and scheduler."""
+        """Configure optimizer and scheduler with warmup."""
         optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.hparams.learning_rate,
             weight_decay=self.hparams.weight_decay,
         )
 
-        # Cosine annealing scheduler
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.trainer.max_epochs,
-            eta_min=self.hparams.learning_rate * 0.1,
-        )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
+        # Cosine annealing scheduler with warmup
+        if self.hparams.use_warmup:
+            from torch.optim.lr_scheduler import OneCycleLR
+            
+            total_steps = self.trainer.estimated_stepping_batches
+            scheduler = OneCycleLR(
+                optimizer,
+                max_lr=self.hparams.learning_rate,
+                total_steps=total_steps,
+                pct_start=self.hparams.warmup_epochs / max(self.trainer.max_epochs, 1),
+                anneal_strategy="cos",
+            )
+            scheduler_config = {
+                "scheduler": scheduler,
+                "interval": "step",
+                "frequency": 1,
+            }
+        else:
+            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=self.trainer.max_epochs,
+                eta_min=self.hparams.learning_rate * 0.1,
+            )
+            scheduler_config = {
                 "scheduler": scheduler,
                 "interval": "epoch",
                 "frequency": 1,
-            },
+            }
+
+        # Configure gradient clipping
+        optimizer_config = {
+            "optimizer": optimizer,
+            "lr_scheduler": scheduler_config,
         }
+        
+        if self.hparams.gradient_clip_val > 0:
+            optimizer_config["gradient_clip_val"] = self.hparams.gradient_clip_val
+            optimizer_config["gradient_clip_algorithm"] = "norm"
+
+        return optimizer_config
 
     def get_model_config(self):
         """Get the model configuration as a dictionary."""
@@ -195,15 +265,18 @@ class EmbeddingDecoderLoss(nn.Module):
     Loss function for embedding prediction.
 
     Combines MSE loss with cosine similarity loss for better embedding alignment.
+    Includes optional label smoothing for regularization.
     """
 
-    def __init__(self, alpha: float = 0.5):
+    def __init__(self, alpha: float = 0.5, label_smoothing: float = 0.0):
         """
         Args:
             alpha: Weight for MSE loss (1-alpha for cosine loss)
+            label_smoothing: Label smoothing factor for MSE loss (0 = no smoothing)
         """
         super().__init__()
         self.alpha = alpha
+        self.label_smoothing = label_smoothing
         self.mse = nn.MSELoss(reduction="none")
 
     def forward(
@@ -212,6 +285,12 @@ class EmbeddingDecoderLoss(nn.Module):
         target: torch.Tensor,
         padding_mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        # Apply label smoothing if enabled
+        if self.label_smoothing > 0:
+            # Add noise to target for smoothing
+            noise = torch.randn_like(target) * self.label_smoothing
+            target = target + noise
+
         # MSE loss (per-element)
         mse_loss = self.mse(predicted, target)
 

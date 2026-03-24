@@ -80,6 +80,9 @@ def parse_args():
         "--num_heads", type=int, default=8, help="Number of attention heads"
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
+    parser.add_argument(
+        "--use_layer_norm", action="store_true", default=True, help="Use pre-normalization in decoder"
+    )
 
     # Training arguments
     parser.add_argument(
@@ -97,6 +100,24 @@ def parse_args():
         type=float,
         default=0.5,
         help="Weight for MSE loss in combined loss",
+    )
+    parser.add_argument(
+        "--label_smoothing",
+        type=float,
+        default=0.0,
+        help="Label smoothing factor for regularization",
+    )
+    parser.add_argument(
+        "--gradient_clip_val",
+        type=float,
+        default=1.0,
+        help="Gradient clipping value",
+    )
+    parser.add_argument(
+        "--use_warmup", action="store_true", default=True, help="Use learning rate warmup"
+    )
+    parser.add_argument(
+        "--warmup_epochs", type=int, default=5, help="Number of warmup epochs"
     )
     parser.add_argument(
         "--seed", type=int, default=42, help="Random seed for reproducibility"
@@ -212,21 +233,15 @@ def main():
         learning_rate=args.learning_rate,
         weight_decay=args.weight_decay,
         loss_alpha=args.loss_alpha,
-    )
-
-    # Setup callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=run_path / "checkpoints",
-        filename="checkpoint-{epoch:02d}-{val_loss:.4f}",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=3,
-        save_last=args.save_last_checkpoint,
+        gradient_clip_val=args.gradient_clip_val,
+        use_warmup=args.use_warmup,
+        warmup_epochs=args.warmup_epochs,
+        use_layer_norm=args.use_layer_norm,
     )
 
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
 
-    callbacks = [checkpoint_callback, best_model_callback]
+    callbacks = [best_model_callback]
 
     if args.early_stopping:
         early_stopping_callback = EarlyStopping(

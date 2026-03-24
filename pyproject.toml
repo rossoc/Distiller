@@ -12,6 +12,7 @@ dependencies = [
     "dotenv>=0.9.9",
     "faiss-cpu>=1.9.0",
     "huggingface-hub>=1.7.2",
+    "ipython>=9.11.0",
     "joblib>=1.5.3",
     "lightning>=2.6.1",
     "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git",
