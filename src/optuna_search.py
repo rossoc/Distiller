@@ -360,7 +360,7 @@ def run_trial(
 
     # Pruning callback
     pruning_callback = PyTorchLightningPruningCallback(
-        trial=trial, monitor="val_loss", patience=args.pruning_patience
+        trial=trial, monitor="val_loss"
     )
 
     callbacks = [checkpoint_callback, best_model_callback, pruning_callback]
