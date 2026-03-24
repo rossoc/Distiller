@@ -229,7 +229,7 @@ def parse_args():
     parser.add_argument(
         "--pruning_patience",
         type=int,
-        default=5,
+        default=10,
         help="Patience for Optuna pruning (epochs without improvement)",
     )
     parser.add_argument(
@@ -252,7 +252,7 @@ def parse_args():
     parser.add_argument(
         "--val_check_interval",
         type=float,
-        default=1.0,
+        default=5.0,
         help="Validation check interval (1.0 = every epoch)",
     )
     parser.add_argument(
