@@ -47,7 +47,7 @@ from optuna.visualization import (
 )
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
+from lightning.pytorch.callbacks import EarlyStopping, RichProgressBar
 
 from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
@@ -180,7 +180,10 @@ def parse_args():
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
     parser.add_argument(
-        "--use_layer_norm", action="store_true", default=True, help="Use pre-normalization"
+        "--use_layer_norm",
+        action="store_true",
+        default=True,
+        help="Use pre-normalization",
     )
 
     # Training arguments
@@ -411,22 +414,12 @@ def run_trial(
     args.loss_alpha = hparams["loss_alpha"]
     args.label_smoothing = hparams["label_smoothing"]
 
-    # Setup callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=run_path / "checkpoints",
-        filename="checkpoint-{epoch:02d}-{val_loss:.4f}",
-        monitor="val_loss",
-        mode="min",
-        save_top_k=1,
-        save_last=False,
-    )
-
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
 
     # Pruning callback
     pruning_callback = PyTorchLightningPruningCallback(trial=trial, monitor="val_loss")
 
-    callbacks = [checkpoint_callback, best_model_callback, pruning_callback]
+    callbacks = [best_model_callback, pruning_callback]
 
     if args.early_stopping:
         early_stopping_callback = EarlyStopping(
@@ -509,9 +502,6 @@ def run_trial(
 
         # Get the best validation loss
         best_val_loss = trainer.callback_metrics.get("val_loss", float("inf")).item()
-
-        # Report back to Optuna
-        trial.report(best_val_loss, trainer.current_epoch)
 
         # Handle pruning based on the intermediate value
         if trial.should_prune():
