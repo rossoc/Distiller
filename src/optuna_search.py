@@ -23,15 +23,19 @@ Output:
         ├── best_model.pt
         ├── training_config.json
         └── lightning_logs/
+
+Note:
+    WandB runs are saved in offline mode by default for parallel execution compatibility.
+    To sync runs to wandb.ai after optimization:
+        wandb sync outputs/optuna/study_*/trial_*/wandb
 """
 
 import argparse
 import json
-import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 # Add src directory to path for imports when running as script
 if __name__ == "__main__":
@@ -55,7 +59,7 @@ from model.diffusion import EmbeddingDecoderLightning
 from model.lightning_interfaces import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
 from util.logger import save_training_config
-from util.randomness import setup_run
+from util.randomness import set_seed
 
 
 def parse_args():
@@ -220,6 +224,9 @@ def parse_args():
         "--min_epochs", type=int, default=1, help="Minimum number of epochs to train"
     )
     parser.add_argument(
+        "--min_steps", type=int, default=None, help="Minimum number of steps to train"
+    )
+    parser.add_argument(
         "--pruning_patience",
         type=int,
         default=5,
@@ -263,7 +270,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def suggest_hyperparameters(trial: optuna.Trial, args: argparse.Namespace) -> Dict[str, Any]:
+def suggest_hyperparameters(
+    trial: optuna.Trial, args: argparse.Namespace
+) -> Dict[str, Any]:
     """
     Suggest hyperparameters for a trial.
 
@@ -316,6 +325,7 @@ def run_trial(
     # Set up random seed for this trial
     trial_seed = args.seed + trial.number
     args.seed = trial_seed
+    set_seed(args.seed)
 
     # Setup the run path
     run_path = trial_dir
@@ -365,9 +375,7 @@ def run_trial(
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
 
     # Pruning callback
-    pruning_callback = PyTorchLightningPruningCallback(
-        trial=trial, monitor="val_loss"
-    )
+    pruning_callback = PyTorchLightningPruningCallback(trial=trial, monitor="val_loss")
 
     callbacks = [checkpoint_callback, best_model_callback, pruning_callback]
 
@@ -389,7 +397,11 @@ def run_trial(
 
     # Setup logger
     if not args.disable_wandb:
+        import os
         import wandb
+
+        # Set offline mode for parallel execution compatibility
+        os.environ["WANDB_MODE"] = "offline"
 
         wandb_run = wandb.init(
             project="embedding-decoder-optuna",
@@ -475,23 +487,45 @@ def save_study_results(study: optuna.Study, output_dir: Path):
     all_trials = []
     for trial in study.trials:
         if trial.state == optuna.trial.TrialState.COMPLETE:
-            all_trials.append({
-                "number": trial.number,
-                "value": trial.value,
-                "params": trial.params,
-                "datetime": trial.datetime_complete.isoformat() if trial.datetime_complete else None,
-            })
+            all_trials.append(
+                {
+                    "number": trial.number,
+                    "value": trial.value,
+                    "params": trial.params,
+                    "datetime": trial.datetime_complete.isoformat()
+                    if trial.datetime_complete
+                    else None,
+                }
+            )
 
     with open(output_dir / "study_results.json", "w") as f:
-        json.dump({
-            "study_name": study.study_name,
-            "n_trials": len(study.trials),
-            "n_complete": len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]),
-            "n_pruned": len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED]),
-            "n_failed": len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]),
-            "best_trial": best_trial_data,
-            "all_trials": all_trials,
-        }, f, indent=2)
+        json.dump(
+            {
+                "study_name": study.study_name,
+                "n_trials": len(study.trials),
+                "n_complete": len(
+                    [
+                        t
+                        for t in study.trials
+                        if t.state == optuna.trial.TrialState.COMPLETE
+                    ]
+                ),
+                "n_pruned": len(
+                    [
+                        t
+                        for t in study.trials
+                        if t.state == optuna.trial.TrialState.PRUNED
+                    ]
+                ),
+                "n_failed": len(
+                    [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+                ),
+                "best_trial": best_trial_data,
+                "all_trials": all_trials,
+            },
+            f,
+            indent=2,
+        )
 
     # Create visualizations
     try:
@@ -520,54 +554,21 @@ def run_parallel_trials(
     study_output_dir: Path,
 ):
     """
-    Run trials in parallel using joblib.
+    Run trials in parallel using Optuna's built-in parallelization.
 
     Args:
         study: Optuna study object
         args: Command-line arguments
         study_output_dir: Output directory for the study
     """
-    from joblib import Parallel, delayed
-
-    def run_single_trial(trial_number: int) -> optuna.Trial:
-        """Run a single trial and return the trial object."""
-        # Create a new trial in the study
-        trial = study.ask()
-
-        try:
-            # Run the trial
-            run_trial(trial, args, study_output_dir)
-
-            # Tell the study the trial completed successfully
-            study.tell(trial, study.tell.__self__.storage.get_trial(trial._trial_id).value)
-
-            return trial
-        except optuna.TrialPruned:
-            # Tell the study the trial was pruned
-            study.tell(trial, state=optuna.trial.TrialState.PRUNED)
-            return trial
-        except Exception as e:
-            # Tell the study the trial failed
-            print(f"Trial {trial_number} failed: {e}")
-            study.tell(trial, state=optuna.trial.TrialState.FAIL)
-            return trial
-
-    # Run trials in parallel batches
-    n_batches = (args.n_trials + args.n_parallel - 1) // args.n_parallel
-
-    for batch_idx in range(n_batches):
-        start_idx = batch_idx * args.n_parallel
-        end_idx = min(start_idx + args.n_parallel, args.n_trials)
-        batch_trials = list(range(start_idx, end_idx))
-
-        print(f"\n{'=' * 60}")
-        print(f"Running batch {batch_idx + 1}/{n_batches} (trials {start_idx}-{end_idx - 1})")
-        print(f"{'=' * 60}\n")
-
-        # Run this batch in parallel
-        Parallel(n_jobs=args.n_parallel, backend="loky")(
-            delayed(run_single_trial)(trial_num) for trial_num in batch_trials
-        )
+    # Use Optuna's built-in parallelization via study.optimize with n_jobs
+    study.optimize(
+        lambda trial: run_trial(trial, args, study_output_dir),
+        n_trials=args.n_trials,
+        timeout=args.timeout * 3600 if args.timeout else None,
+        n_jobs=args.n_parallel,  # Use Optuna's built-in parallelization
+        show_progress_bar=True,
+    )
 
 
 def main():
@@ -605,31 +606,27 @@ def main():
     # Set study direction
     print("Optimizing for minimum validation loss")
 
-    # Run optimization
-    timeout_seconds = args.timeout * 3600 if args.timeout else None
-
-    if args.n_parallel > 1:
-        # Parallel execution
-        run_parallel_trials(study, args, study_output_dir)
-    else:
-        # Sequential execution
-        study.optimize(
-            lambda trial: run_trial(trial, args, study_output_dir),
-            n_trials=args.n_trials,
-            timeout=timeout_seconds,
-            show_progress_bar=True,
-        )
+    # Run optimization (handles both sequential and parallel via n_jobs)
+    run_parallel_trials(study, args, study_output_dir)
 
     # Print results
     print(f"\n{'=' * 60}")
     print("Optimization Complete!")
     print(f"{'=' * 60}")
     print(f"Number of finished trials: {len(study.trials)}")
-    print(f"Number of complete trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}")
-    print(f"Number of pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}")
-    print(f"Number of failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}")
+    print(
+        f"Number of complete trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])}"
+    )
+    print(
+        f"Number of pruned trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])}"
+    )
+    print(
+        f"Number of failed trials: {len([t for t in study.trials if t.state == optuna.trial.TrialState.FAIL])}"
+    )
 
-    if study.trials and any(t.state == optuna.trial.TrialState.COMPLETE for t in study.trials):
+    if study.trials and any(
+        t.state == optuna.trial.TrialState.COMPLETE for t in study.trials
+    ):
         print(f"\nBest trial: {study.best_trial.number}")
         print(f"Best validation loss: {study.best_value:.4f}")
         print("\nBest hyperparameters:")
