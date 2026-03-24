@@ -346,6 +346,12 @@ def run_trial(
         loss_alpha=args.loss_alpha,
     )
 
+    # Set hyperparameters on args for save_training_config
+    args.num_layers = hparams["num_layers"]
+    args.fwd_dim = hparams["fwd_dim"]
+    args.num_heads = hparams["num_heads"]
+    args.learning_rate = hparams["learning_rate"]
+
     # Setup callbacks
     checkpoint_callback = ModelCheckpoint(
         dirpath=run_path / "checkpoints",
