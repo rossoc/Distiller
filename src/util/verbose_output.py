@@ -11,6 +11,7 @@ def print_verbose_setup_diffusion(args):
     print(f"  Seed: {args.seed}")
     print(f"{'=' * 60}\n")
 
+
 def print_verbose_training_complete(run_path):
     print(f"\n{'=' * 60}")
     print("Training Complete!")
