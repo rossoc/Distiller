@@ -179,20 +179,22 @@ def run_predictions(
 
             # Move to CPU and store
             pooled_output = pooled_output.cpu().numpy()
-            output_seq = output.cpu().numpy()
+            
+            # Store full predictions as list (variable sequence lengths)
+            for i in range(batch_size):
+                seq_len = tgt_mask[i].sum().item()
+                full_predictions.append(output[i, :seq_len, :].cpu().numpy())
 
             pooled_predictions.append(pooled_output)
-            full_predictions.append(output_seq)
             input_texts.extend(batch["input_text"])
             target_texts.extend(batch["target_text"])
 
     # Concatenate all batches
     pooled_predictions = np.vstack(pooled_predictions)
-    full_predictions = np.vstack(full_predictions)
 
     print(f"Generated {len(pooled_predictions)} predictions")
     print(f"Pooled prediction shape: {pooled_predictions.shape}")
-    print(f"Full prediction shape: {full_predictions.shape}")
+    print(f"Full predictions: {len(full_predictions)} sequences")
 
     return pooled_predictions, input_texts, target_texts, full_predictions
 
@@ -444,7 +446,8 @@ def main():
     # Optionally save full predictions for deeper analysis
     if args.save_full_predictions:
         full_pred_path = output_dir / f"full_predictions_{timestamp}.npy"
-        np.save(full_pred_path, full_predictions)
+        # Save as object array since sequences have variable lengths
+        np.save(full_pred_path, np.array(full_predictions, dtype=object))
         print(f"Full predictions saved to: {full_pred_path}")
 
     # Print sample results
