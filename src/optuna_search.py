@@ -12,10 +12,11 @@ This script uses Optuna to search for optimal hyperparameters:
 - loss_alpha: Weight for MSE loss in combined loss
 - label_smoothing: Label smoothing factor
 
-Multiple trials can be run in parallel to utilize available GPU/CPU resources.
+Trials are run sequentially. Each trial trains a model and saves the results
+to a trial-specific directory.
 
 Usage:
-    python src/optuna_search.py --n_trials 20 --n_parallel 3 --epochs 30
+    python src/optuna_search.py --n_trials 200 --epochs 50
 
 Output:
     outputs/optuna/study_{timestamp}/
@@ -29,7 +30,7 @@ Output:
         └── lightning_logs/
 
 Note:
-    WandB runs are saved in offline mode by default for parallel execution compatibility.
+    WandB runs are saved in offline mode by default.
     To sync runs to wandb.ai after optimization:
         wandb sync outputs/optuna/study_*/trial_*/wandb
 """
@@ -71,12 +72,6 @@ def parse_args():
         type=int,
         default=20,
         help="Number of trials to run (default: 20)",
-    )
-    parser.add_argument(
-        "--n_parallel",
-        type=int,
-        default=1,
-        help="Number of parallel trials to run (default: 1)",
     )
     parser.add_argument(
         "--timeout",
@@ -425,7 +420,7 @@ def run_trial(
     args.loss_alpha = hparams["loss_alpha"]
     args.label_smoothing = hparams["label_smoothing"]
 
-    best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
+    best_model_callback = BestModelSaveCallback(run_path)
 
     # Pruning callback
     pruning_callback = PyTorchLightningPruningCallback(trial=trial, monitor="val_loss")
@@ -449,18 +444,20 @@ def run_trial(
         callbacks.append(progress_bar_callback)
 
     # Setup logger
+    wandb_run = None
     if not args.disable_wandb:
         import os
         import wandb
 
-        # Set offline mode for parallel execution compatibility
+        # Set offline mode
         os.environ["WANDB_MODE"] = "offline"
 
         wandb_run = wandb.init(
             project="embedding-decoder-optuna",
             name=f"trial_{trial.number:03d}",
             dir=str(run_path),
-            reinit=True,
+            resume="never",
+            force=True,
         )
         wandb_run.config.update(hparams)
 
@@ -522,11 +519,8 @@ def run_trial(
         return best_val_loss
     finally:
         # Clean up WandB run to prevent issues with subsequent trials
-        if not args.disable_wandb:
-            import wandb
-
-            if wandb.run is not None:
-                wandb.finish()
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 def save_study_results(study: optuna.Study, output_dir: Path):
@@ -607,25 +601,23 @@ def save_study_results(study: optuna.Study, output_dir: Path):
         print("  pip install plotly kaleido")
 
 
-def run_parallel_trials(
+def run_optimization(
     study: optuna.Study,
     args: argparse.Namespace,
     study_output_dir: Path,
 ):
     """
-    Run trials in parallel using Optuna's built-in parallelization.
+    Run Optuna optimization trials sequentially.
 
     Args:
         study: Optuna study object
         args: Command-line arguments
         study_output_dir: Output directory for the study
     """
-    # Use Optuna's built-in parallelization via study.optimize with n_jobs
     study.optimize(
         lambda trial: run_trial(trial, args, study_output_dir),
         n_trials=args.n_trials,
         timeout=args.timeout * 3600 if args.timeout else None,
-        n_jobs=args.n_parallel,  # Use Optuna's built-in parallelization
         show_progress_bar=True,
     )
 
@@ -665,8 +657,8 @@ def main():
     # Set study direction
     print("Optimizing for minimum validation loss")
 
-    # Run optimization (handles both sequential and parallel via n_jobs)
-    run_parallel_trials(study, args, study_output_dir)
+    # Run optimization
+    run_optimization(study, args, study_output_dir)
 
     # Print results
     print(f"\n{'=' * 60}")

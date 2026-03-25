@@ -53,6 +53,9 @@ class BestModelSaveCallback(L.Callback):
             pl_module: The Lightning module to save
             sync: If True, wait for disk write to complete
         """
+        # Ensure parent directory exists
+        self.save_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Move state dict to CPU to avoid GPU memory accumulation
         state_dict = {k: v.cpu() for k, v in pl_module.state_dict().items()}
 
