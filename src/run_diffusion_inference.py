@@ -139,15 +139,15 @@ def run_predictions(
                     tgt = model(
                         memory=input_embeddings,
                         tgt=tgt,
-                        memory_mask=memory_mask,
-                        tgt_mask=tgt_mask,
+                        memory_padding_mask=memory_mask,
+                        tgt_padding_mask=tgt_mask,
                     )
 
             output = model(
                 memory=input_embeddings,
                 tgt=tgt,
-                memory_mask=memory_mask,
-                tgt_mask=tgt_mask,
+                memory_padding_mask=memory_mask,
+                tgt_padding_mask=tgt_mask,
             )
 
             # Output shape: (batch, seq_len, 768)
