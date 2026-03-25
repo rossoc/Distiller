@@ -326,10 +326,11 @@ class DiffusionLoss(nn.Module):
 
         # Apply padding mask if provided
         if mask is not None:
-            mask = mask.unsqueeze(-1)
-            mse_loss = mse_loss * (~mask)
-
-        mse_loss = mse_loss.mean()
+            mse_loss = mse_loss * (~mask.unsqueeze(-1))
+            num_valid_tokens = (~mask).sum() * predicted.shape[-1]
+            mse_loss = mse_loss.sum() / num_valid_tokens.clamp(min=1)
+        else:
+            mse_loss = mse_loss.mean()
 
         cosine_loss = 1 - cosine_similarity(predicted, target, mask)
 
