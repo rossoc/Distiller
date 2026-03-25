@@ -165,39 +165,32 @@ class TokenExtractor:
         
         if token_embd is None:
             raise ValueError("Token embedding tensor not found in GGUF file")
-        
+
         # Dequantize weights
         from gguf import dequantize
         embedding_weights = dequantize(token_embd.data, token_embd.tensor_type)
-        
+
         # Ensure correct shape (vocab_size, embedding_dim)
         if embedding_weights.shape == (768, 262144):
             embedding_weights = embedding_weights.T
-        
-        # Extract vocabulary
+
+        # Extract vocabulary using .contents() method
         tokens_field = reader.fields['tokenizer.ggml.tokens']
-        tokens = []
-        for item in tokens_field.data:
-            if isinstance(item, bytes):
-                tokens.append(item.decode('utf-8'))
-            elif hasattr(item, 'tobytes'):
-                tokens.append(item.tobytes().rstrip(b'\x00').decode('utf-8'))
-            else:
-                tokens.append(str(item))
-        
+        tokens = tokens_field.contents()  # Returns list of strings
+
         # Get special token IDs
         bos_field = reader.fields['tokenizer.ggml.bos_token_id']
         eos_field = reader.fields['tokenizer.ggml.eos_token_id']
         bos_id = int(bos_field.parts[0][0])
         eos_id = int(eos_field.parts[0][0])
-        
+
         vocab_data = {
             'tokens': tokens,
             'bos_token_id': bos_id,
             'eos_token_id': eos_id,
             'vocab_size': len(tokens)
         }
-        
+
         return embedding_weights, vocab_data
     
     def extract_token(
