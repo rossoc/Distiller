@@ -87,13 +87,8 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
         )
 
-    def train_dataloader(self) -> DataLoader:
-        """Return the training dataloader."""
-        X_train, y_train = self.train_data
-
-        dataset = EmbeddingDecoderDataset(
-            X_train, y_train, self.encoder, self.max_length
-        )
+    def _build_dataloader(self, X, y) -> DataLoader:
+        dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length)
 
         return DataLoader(
             dataset,
@@ -102,37 +97,23 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             num_workers=self.num_workers,
             collate_fn=embedding_collate_fn,
             pin_memory=True,
+            drop_last=True,
         )
+
+    def train_dataloader(self) -> DataLoader:
+        """Return the training dataloader."""
+        X_train, y_train = self.train_data  # type: ignore
+        return self._build_dataloader(X_train, y_train)
 
     def val_dataloader(self) -> DataLoader:
         """Return the validation dataloader."""
-        X_eval, y_eval = self.eval_data
-
-        dataset = EmbeddingDecoderDataset(X_eval, y_eval, self.encoder, self.max_length)
-
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=embedding_collate_fn,
-            pin_memory=True,
-        )
+        X_eval, y_eval = self.eval_data  # type: ignore
+        return self._build_dataloader(X_eval, y_eval)
 
     def test_dataloader(self) -> DataLoader:
         """Return the test dataloader."""
-        X_test, y_test = self.test_data
-
-        dataset = EmbeddingDecoderDataset(X_test, y_test, self.encoder, self.max_length)
-
-        return DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=embedding_collate_fn,
-            pin_memory=True,
-        )
+        X_test, y_test = self.test_data  # type: ignore
+        return self._build_dataloader(X_test, y_test)
 
     def get_dataset_info(self) -> dict:
         """Get information about the datasets."""
