@@ -18,8 +18,7 @@ This project includes an **Embedding Decoder** module that enables generating te
 ### Installation
 
 ```bash
-# Install additional dependencies for the decoder
-pip install -r requirements-decoder.txt
+uv sync
 ```
 
 ### Training
