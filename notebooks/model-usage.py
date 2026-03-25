@@ -56,7 +56,7 @@ schemas["by_group"]["target"] = target
 # %% [markdown]
 # # Check inference statistics
 # %%
-json_path = "outputs/inference/inference_results_20260324_155925.json"
+json_path = "outputs/inference/inference_results_20260325_012517.json"
 print(f"Loading inference results from: {json_path}")
 result = parse_inference(json_path)
 print(f"Loaded {len(result)} samples")
@@ -68,4 +68,12 @@ print_match_statistics(stats)
 # %%
 metrics = compute_per_label_metrics(result)
 print_per_label_metrics(metrics)
+# %%
+json_path = "outputs/diffusion_inference/inference_results_20260325_165351.json"
+print(f"Loading inference results from: {json_path}")
+result = parse_inference(json_path)
+print(f"Loaded {len(result)} samples")
+# %%
+stats = compute_match_statistics(json_path)
+print_match_statistics(stats)
 # %%
