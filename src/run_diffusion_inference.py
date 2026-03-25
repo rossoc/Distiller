@@ -131,30 +131,23 @@ def run_predictions(
 
             # We use Option 2: Initialize with input embeddings projected to target length
             # Get target sequence length
-            max_tgt_len = target_embeddings.shape[1]
+            tgt = torch.zeros_like(target_embeddings)
 
-            # Create initial target from input (repeat/pad to match target length)
-            # This gives the model a starting point based on the input
-            if input_embeddings.shape[1] >= max_tgt_len:
-                # Input is longer, just truncate
-                init_tgt = input_embeddings[:, :max_tgt_len, :].clone()
-            else:
-                # Input is shorter, repeat and pad
-                repeats = (max_tgt_len // input_embeddings.shape[1]) + 1
-                init_tgt = input_embeddings.repeat(1, repeats, 1)[
-                    :, :max_tgt_len, :
-                ].clone()
+            # Forward pass
+            with torch.no_grad():
+                for i in range(2):
+                    tgt = model(
+                        memory=input_embeddings,
+                        tgt=tgt,
+                        memory_mask=memory_mask,
+                        tgt_mask=tgt_mask,
+                    )
 
-            # Add some noise to avoid exact copies (optional, can help with diversity)
-            # noise = torch.randn_like(init_tgt) * 0.1
-            # init_tgt = init_tgt + noise
-
-            # Run forward pass
             output = model(
                 memory=input_embeddings,
-                tgt=init_tgt,
-                memory_padding_mask=memory_mask,
-                tgt_padding_mask=tgt_mask,
+                tgt=tgt,
+                memory_mask=memory_mask,
+                tgt_mask=tgt_mask,
             )
 
             # Output shape: (batch, seq_len, 768)
