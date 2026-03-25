@@ -54,10 +54,10 @@ class EmbeddingDecoderDataset(Dataset):
     def _encode_texts(self, texts: List[str], is_input: str) -> list[np.ndarray]:
         """Encode texts in batches for better performance."""
         all_embeddings = []
+        print(f"Processing {is_input} Embeddings")
 
         # Process in chunks of batch_size
-        pbar = trange(0, len(texts), self.batch_size, leave=False, desc=is_input)
-        for i in pbar:
+        for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
 
             try:
@@ -178,4 +178,3 @@ def build_faiss_index_from_dataset(
     )
 
     return retriever
-
