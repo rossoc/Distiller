@@ -17,17 +17,20 @@ Output:
 """
 
 import argparse
-import json
 
 import lightning as L
-from lightning.pytorch.callbacks import ModelCheckpoint, EarlyStopping, RichProgressBar
+from lightning.pytorch.callbacks import EarlyStopping, RichProgressBar
 from lightning.pytorch.loggers import WandbLogger
 
-from model.diffusion import EmbeddingDecoderLightning
-from model.lightning_interfaces import BestModelSaveCallback
+from model.diffusion_trainer import DiffusionTrainer
+from model.callback import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
-from util.logger import save_training_config
+from util.logger import log_training_config, log_test_results
 from util.randomness import setup_run
+from util.verbose_output import (
+    print_verbose_setup_diffusion,
+    print_verbose_training_complete,
+)
 
 
 def parse_args():
@@ -53,7 +56,7 @@ def parse_args():
     parser.add_argument(
         "--max_length",
         type=int,
-        default=512,
+        default=2048,
         help="Maximum sequence length for embeddings",
     )
     parser.add_argument(
@@ -80,9 +83,6 @@ def parse_args():
         "--num_heads", type=int, default=8, help="Number of attention heads"
     )
     parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
-    parser.add_argument(
-        "--use_layer_norm", action="store_true", default=True, help="Use pre-normalization in decoder"
-    )
 
     # Training arguments
     parser.add_argument(
@@ -114,7 +114,10 @@ def parse_args():
         help="Gradient clipping value",
     )
     parser.add_argument(
-        "--use_warmup", action="store_true", default=True, help="Use learning rate warmup"
+        "--use_warmup",
+        action="store_true",
+        default=True,
+        help="Use learning rate warmup",
     )
     parser.add_argument(
         "--warmup_epochs", type=int, default=5, help="Number of warmup epochs"
@@ -223,7 +226,7 @@ def main():
 
     # Create Lightning module
     print("Creating model...")
-    model = EmbeddingDecoderLightning(
+    model = DiffusionTrainer(
         output_dim=768,
         emb_dim=args.emb_dim,
         num_layers=args.num_layers,
@@ -236,7 +239,6 @@ def main():
         gradient_clip_val=args.gradient_clip_val,
         use_warmup=args.use_warmup,
         warmup_epochs=args.warmup_epochs,
-        use_layer_norm=args.use_layer_norm,
     )
 
     best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
@@ -263,7 +265,7 @@ def main():
     logger = WandbLogger(
         save_dir=str(run_path),
         name=args.run_name or "decoder",
-        project="embedding-decoder",
+        project="simple-diffusion",
     )
     print("Using Wandb logger")
 
@@ -279,7 +281,6 @@ def main():
         val_check_interval=args.val_check_interval,
         callbacks=callbacks,
         logger=logger,
-        enable_checkpointing=True,
         enable_progress_bar=not args.disable_progress_bar,
         enable_model_summary=True,
     )
@@ -288,23 +289,10 @@ def main():
     print("\nSetting up data...")
     datamodule.setup()
     data_info = datamodule.get_dataset_info()
-    save_training_config(run_path, args, data_info)
+    log_training_config(run_path, args, data_info)
 
     # Print training summary
-    print(f"\n{'=' * 60}")
-    print("Training Configuration:")
-    print(f"{'=' * 60}")
-    print(
-        f"  Model: {args.emb_dim}d emb, {args.num_layers} layers, {args.num_heads} heads"
-    )
-    print(f"  Batch size: {args.batch_size}")
-    print(f"  Learning rate: {args.learning_rate}")
-    print(f"  Epochs: {args.epochs}")
-    print(f"  Seed: {args.seed}")
-    print(f"  Train samples: {data_info['train_samples']}")
-    print(f"  Eval samples: {data_info['eval_samples']}")
-    print(f"  Test samples: {data_info['test_samples']}")
-    print(f"{'=' * 60}\n")
+    print_verbose_setup_diffusion(args)
 
     # Train
     print("Starting training...")
@@ -315,20 +303,10 @@ def main():
     test_results = trainer.test(model, datamodule=datamodule)
 
     # Save test results
-    test_results_path = run_path / "test_results.json"
-    with open(test_results_path, "w") as f:
-        json.dump(test_results, f, indent=2)
+    log_test_results(test_results, run_path)
 
     # Print summary
-    print(f"\n{'=' * 60}")
-    print("Training Complete!")
-    print(f"{'=' * 60}")
-    print(f"Output folder: {run_path.absolute()}")
-    print(f"Best model: {run_path / 'best_model.pt'}")
-    print(f"Config: {run_path / 'training_config.json'}")
-    print(f"Logs: {run_path / 'lightning_logs'}")
-    print(f"Checkpoints: {run_path / 'checkpoints'}")
-    print(f"{'=' * 60}")
+    print_verbose_training_complete(run_path)
 
 
 if __name__ == "__main__":

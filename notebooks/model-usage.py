@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 from os import getenv
 from src.data.util import by_group
 from src.util.logger import write_data_config, read_data_config
-from src.util.inference import (
+from src.util.result_analysis import (
     compute_per_label_metrics,
     parse_inference,
     compute_match_statistics,

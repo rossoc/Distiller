@@ -38,7 +38,7 @@ def create_output_folder(output_dir: str, run_name: Optional[str] = None) -> Pat
     return run_path
 
 
-def save_training_config(run_path: Path, args: argparse.Namespace, data_info: dict):
+def log_training_config(run_path: Path, args: argparse.Namespace, data_info: dict):
     """
     Save the training configuration to a JSON file.
 
@@ -80,6 +80,12 @@ def save_training_config(run_path: Path, args: argparse.Namespace, data_info: di
         json.dump(config, f, indent=2)
 
     print(f"Training config saved to: {config_path}")
+
+
+def log_test_results(results, run_path):
+    test_results_path = run_path / "test_results.json"
+    with open(test_results_path, "w") as f:
+        json.dump(results, f, indent=2)
 
 
 def write_data_config(key, value, config):

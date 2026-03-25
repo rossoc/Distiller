@@ -7,14 +7,35 @@ Wraps the Decoder model with Lightning's training interface.
 import torch
 import torch.nn as nn
 import lightning as L
+from torch.optim.lr_scheduler import OneCycleLR
+from dataclasses import dataclass
 
+from typing import Optional
 from model.decoder import Decoder
 
 
-class EmbeddingDecoderLightning(L.LightningModule):
+@dataclass
+class TrainerHparams:
+    output_dim: int = 768
+    emb_dim: int = 768
+    num_layers: int = 6
+    fwd_dim: int = 2048
+    num_heads: int = 8
+    dropout: float = 0.1
+    learning_rate: float = 1e-4
+    weight_decay: float = 0.01
+    loss_alpha: float = 0.5
+    gradient_clip_val: float = 1.0
+    use_warmup: bool = True
+    warmup_epochs: int = 5
+
+
+class DiffusionTrainer(L.LightningModule):
     """
     Lightning module for training the embedding decoder.
     """
+
+    hparams: TrainerHparams
 
     def __init__(
         self,
@@ -27,11 +48,9 @@ class EmbeddingDecoderLightning(L.LightningModule):
         learning_rate: float = 1e-4,
         weight_decay: float = 0.01,
         loss_alpha: float = 0.5,
-        label_smoothing: float = 0.0,
         gradient_clip_val: float = 1.0,
         use_warmup: bool = True,
         warmup_epochs: int = 5,
-        use_layer_norm: bool = True,
     ):
         """
         Initialize the Lightning module.
@@ -50,7 +69,6 @@ class EmbeddingDecoderLightning(L.LightningModule):
             gradient_clip_val: Gradient clipping value (disabled if <= 0)
             use_warmup: Whether to use learning rate warmup
             warmup_epochs: Number of warmup epochs
-            use_layer_norm: Whether to use pre-normalization in decoder
         """
         super().__init__()
         self.save_hyperparameters()
@@ -63,11 +81,10 @@ class EmbeddingDecoderLightning(L.LightningModule):
             fwd_dim=fwd_dim,
             num_heads=num_heads,
             dropout=dropout,
-            use_layer_norm=use_layer_norm,
         )
 
         # Loss function
-        self.criterion = EmbeddingDecoderLoss(alpha=loss_alpha, label_smoothing=label_smoothing)
+        self.criterion = DiffusionLoss(alpha=loss_alpha)
 
         # For tracking best validation loss
         self.best_val_loss = float("inf")
@@ -87,33 +104,26 @@ class EmbeddingDecoderLightning(L.LightningModule):
         """Training step."""
         input_embeddings = batch["input_embeddings"]
         target_embeddings = batch["target_embeddings"]
-        memory_padding_mask = batch["input_attention_mask"] == 0
-        tgt_padding_mask = batch["target_attention_mask"] == 0
+        memory_mask = batch["input_attention_mask"] == 0
+        tgt_mask = batch["target_attention_mask"] == 0
 
         # Forward pass
-        predicted_embeddings = self(
+        predicted_embeddings = self.model(
             memory=input_embeddings,
             tgt=target_embeddings,
-            memory_padding_mask=memory_padding_mask,
-            tgt_padding_mask=tgt_padding_mask,
+            memory_mask=memory_mask,
+            tgt_padding_mask=tgt_mask,
         )
 
         # Compute loss
-        loss = self.criterion(predicted_embeddings, target_embeddings, tgt_padding_mask)
+        loss = self.criterion(predicted_embeddings, target_embeddings, tgt_mask)
 
         # Compute additional metrics for monitoring
         with torch.no_grad():
             # Cosine similarity metric
-            pred_norm = torch.norm(predicted_embeddings, p=2, dim=-1)
-            tgt_norm = torch.norm(target_embeddings, p=2, dim=-1)
-            cosine_sim = (predicted_embeddings * target_embeddings).sum(dim=-1) / (
-                pred_norm * tgt_norm + 1e-8
+            avg_cosine_sim = cosine_similarity(
+                predicted_embeddings, target_embeddings, tgt_mask
             )
-            if tgt_padding_mask is not None:
-                cosine_sim = cosine_sim * (~tgt_padding_mask)
-                avg_cosine_sim = cosine_sim.sum() / (~tgt_padding_mask).sum()
-            else:
-                avg_cosine_sim = cosine_sim.mean()
 
             # MSE metric
             mse = ((predicted_embeddings - target_embeddings) ** 2).mean()
@@ -150,16 +160,9 @@ class EmbeddingDecoderLightning(L.LightningModule):
         # Compute additional metrics
         with torch.no_grad():
             # Cosine similarity metric
-            pred_norm = torch.norm(predicted_embeddings, p=2, dim=-1)
-            tgt_norm = torch.norm(target_embeddings, p=2, dim=-1)
-            cosine_sim = (predicted_embeddings * target_embeddings).sum(dim=-1) / (
-                pred_norm * tgt_norm + 1e-8
+            avg_cosine_sim = cosine_similarity(
+                predicted_embeddings, target_embeddings, tgt_padding_mask
             )
-            if tgt_padding_mask is not None:
-                cosine_sim = cosine_sim * (~tgt_padding_mask)
-                avg_cosine_sim = cosine_sim.sum() / (~tgt_padding_mask).sum()
-            else:
-                avg_cosine_sim = cosine_sim.mean()
 
         # Log metrics
         self.log(
@@ -194,8 +197,17 @@ class EmbeddingDecoderLightning(L.LightningModule):
             predicted_embeddings, target_embeddings, tgt_padding_mask
         )
 
+        # Compute cosine similarity metric
+        with torch.no_grad():
+            avg_cosine_sim = cosine_similarity(
+                predicted_embeddings, target_embeddings, tgt_padding_mask
+            )
+
         # Log metrics
         self.log("test_loss", test_loss, on_step=False, on_epoch=True, logger=True)
+        self.log(
+            "test_cosine_sim", avg_cosine_sim, on_step=False, on_epoch=True, logger=True
+        )
 
         return test_loss
 
@@ -209,14 +221,13 @@ class EmbeddingDecoderLightning(L.LightningModule):
 
         # Cosine annealing scheduler with warmup
         if self.hparams.use_warmup:
-            from torch.optim.lr_scheduler import OneCycleLR
-            
             total_steps = self.trainer.estimated_stepping_batches
             scheduler = OneCycleLR(
                 optimizer,
                 max_lr=self.hparams.learning_rate,
-                total_steps=total_steps,
-                pct_start=self.hparams.warmup_epochs / max(self.trainer.max_epochs, 1),
+                total_steps=int(total_steps),
+                pct_start=self.hparams.warmup_epochs
+                / max(self.trainer.max_epochs or 0, 1),
                 anneal_strategy="cos",
             )
             scheduler_config = {
@@ -227,7 +238,7 @@ class EmbeddingDecoderLightning(L.LightningModule):
         else:
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
-                T_max=self.trainer.max_epochs,
+                T_max=self.trainer.max_epochs or 0,
                 eta_min=self.hparams.learning_rate * 0.1,
             )
             scheduler_config = {
@@ -241,7 +252,7 @@ class EmbeddingDecoderLightning(L.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": scheduler_config,
         }
-        
+
         if self.hparams.gradient_clip_val > 0:
             optimizer_config["gradient_clip_val"] = self.hparams.gradient_clip_val
             optimizer_config["gradient_clip_algorithm"] = "norm"
@@ -260,7 +271,34 @@ class EmbeddingDecoderLightning(L.LightningModule):
         }
 
 
-class EmbeddingDecoderLoss(nn.Module):
+def cosine_similarity(
+    pred: torch.Tensor, target: torch.Tensor, tgt_mask: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+    """
+    Compute cosine similarity between predictions and targets.
+
+    Args:
+        pred: Predicted embeddings of shape (batch, seq_len, dim)
+        target: Target embeddings of shape (batch, seq_len, dim)
+        tgt_mask: Boolean padding mask of shape (batch, seq_len), where True = padding
+
+    Returns:
+        Average cosine similarity (scalar tensor), ignoring padding tokens if mask provided
+    """
+    pred_norm = torch.norm(pred, p=2, dim=-1)
+    tgt_norm = torch.norm(target, p=2, dim=-1)
+    cos_sim = (pred * target).sum(dim=-1) / (pred_norm * tgt_norm + 1e-8)
+
+    if tgt_mask is not None:
+        cos_sim = cos_sim * (~tgt_mask)
+        avg_cos_sim = cos_sim.sum() / (~tgt_mask).sum()
+    else:
+        avg_cos_sim = cos_sim.mean()
+
+    return avg_cos_sim
+
+
+class DiffusionLoss(nn.Module):
     """
     Loss function for embedding prediction.
 
@@ -276,46 +314,23 @@ class EmbeddingDecoderLoss(nn.Module):
         """
         super().__init__()
         self.alpha = alpha
-        self.label_smoothing = label_smoothing
         self.mse = nn.MSELoss(reduction="none")
 
     def forward(
         self,
         predicted: torch.Tensor,
         target: torch.Tensor,
-        padding_mask: torch.Tensor = None,
+        mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # Apply label smoothing if enabled
-        if self.label_smoothing > 0:
-            # Add noise to target for smoothing
-            noise = torch.randn_like(target) * self.label_smoothing
-            target = target + noise
-
-        # MSE loss (per-element)
         mse_loss = self.mse(predicted, target)
 
         # Apply padding mask if provided
-        if padding_mask is not None:
-            # Mask shape: (batch, seq_len), expand to match loss shape
-            mask = padding_mask.unsqueeze(-1)  # (batch, seq_len, 1)
+        if mask is not None:
+            mask = mask.unsqueeze(-1)
             mse_loss = mse_loss * (~mask)
 
         mse_loss = mse_loss.mean()
 
-        # Cosine similarity loss
-        pred_norm = torch.norm(predicted, p=2, dim=-1, keepdim=True)
-        tgt_norm = torch.norm(target, p=2, dim=-1, keepdim=True)
-        pred_normalized = predicted / (pred_norm + 1e-8)
-        target_normalized = target / (tgt_norm + 1e-8)
+        cosine_loss = 1 - cosine_similarity(predicted, target, mask)
 
-        cosine_sim = torch.sum(pred_normalized * target_normalized, dim=-1)
-
-        # Apply padding mask to cosine loss
-        if padding_mask is not None:
-            cosine_sim = cosine_sim * (~padding_mask)
-            cosine_loss = 1 - cosine_sim.sum() / (~padding_mask).sum()
-        else:
-            cosine_loss = 1 - cosine_sim.mean()
-
-        # Combined loss
         return self.alpha * mse_loss + (1 - self.alpha) * cosine_loss

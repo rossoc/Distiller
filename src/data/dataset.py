@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 from typing import List, Dict, Any
 import numpy as np
+from model.faiss_retriever import FAISSRetriever
 
 
 class EmbeddingDecoderDataset(Dataset):
@@ -27,7 +28,7 @@ class EmbeddingDecoderDataset(Dataset):
         X_texts: List[str],
         y_texts: List[str],
         encoder,
-        max_length: int = 512,
+        max_length: int = 2048,
         batch_size: int = 64,
     ):
         """
@@ -50,7 +51,7 @@ class EmbeddingDecoderDataset(Dataset):
         self.target_embeddings = self._encode_texts(y_texts, "Target")
         print(f"Dataset ready with {len(self)} samples")
 
-    def _encode_texts(self, texts: List[str], is_input: str) -> List[np.ndarray]:
+    def _encode_texts(self, texts: List[str], is_input: str) -> list[np.ndarray]:
         """Encode texts in batches for better performance."""
         all_embeddings = []
 
@@ -152,7 +153,7 @@ def embedding_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
 def build_faiss_index_from_dataset(
     dataset: EmbeddingDecoderDataset,
     save_path: str,
-) -> "FAISSRetriever":
+) -> FAISSRetriever:
     """
     Build a FAISS index from a dataset's target texts and embeddings.
 
