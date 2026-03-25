@@ -107,10 +107,13 @@ class DiffusionTrainer(L.LightningModule):
         memory_mask = batch["input_attention_mask"] == 0
         tgt_mask = batch["target_attention_mask"] == 0
 
+        max_tgt_len = target_embeddings.shape[1]
+        init_tgt = input_embeddings[:, :max_tgt_len, :].clone()
+
         # Forward pass
         predicted_embeddings = self.model(
             memory=input_embeddings,
-            tgt=target_embeddings,
+            tgt=init_tgt,
             memory_mask=memory_mask,
             tgt_mask=tgt_mask,
         )
