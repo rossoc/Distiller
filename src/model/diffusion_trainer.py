@@ -96,8 +96,8 @@ class DiffusionTrainer(L.LightningModule):
         return self.model(
             memory=memory,
             tgt=tgt,
-            memory_padding_mask=memory_padding_mask,
-            tgt_padding_mask=tgt_padding_mask,
+            memory_mask=memory_padding_mask,
+            tgt_mask=tgt_padding_mask,
         )
 
     def training_step(self, batch, batch_idx):
