@@ -212,8 +212,6 @@ def main():
     # Setup the run
     run_path = setup_run(args)
 
-    # Create data module
-    print("Initializing data module...")
     datamodule = EmbeddingDecoderDataModule(
         train_ratio=args.train_ratio,
         eval_ratio=args.eval_ratio,
@@ -224,8 +222,6 @@ def main():
         seed=args.seed,
     )
 
-    # Create Lightning module
-    print("Creating model...")
     model = DiffusionTrainer(
         output_dim=768,
         emb_dim=args.emb_dim,
@@ -241,25 +237,23 @@ def main():
         warmup_epochs=args.warmup_epochs,
     )
 
-    best_model_callback = BestModelSaveCallback(run_path / "best_model.pt")
-
-    callbacks = [best_model_callback]
+    callbacks = [BestModelSaveCallback(run_path)]
 
     if args.early_stopping:
         early_stopping_callback = EarlyStopping(
             monitor="val_loss",
             mode="min",
             patience=args.early_stopping_patience,
-            verbose=True,
+            verbose=False,
         )
-        callbacks.append(early_stopping_callback)
+        callbacks += [early_stopping_callback]
 
     # Add progress bar callback with configurable refresh rate
     if not args.disable_progress_bar:
         progress_bar_callback = RichProgressBar(
             refresh_rate=args.progress_bar_refresh_rate
         )
-        callbacks.append(progress_bar_callback)
+        callbacks += [progress_bar_callback]
 
     # Setup logger
     logger = WandbLogger(
@@ -267,7 +261,6 @@ def main():
         name=args.run_name or "decoder",
         project="simple-diffusion",
     )
-    print("Using Wandb logger")
 
     # Create trainer
     trainer = L.Trainer(
@@ -294,18 +287,12 @@ def main():
     # Print training summary
     print_verbose_setup_diffusion(args)
 
-    # Train
-    print("Starting training...")
     trainer.fit(model, datamodule=datamodule)
 
-    # Test on test set
-    print("\nRunning final evaluation on test set...")
     test_results = trainer.test(model, datamodule=datamodule)
 
-    # Save test results
     log_test_results(test_results, run_path)
 
-    # Print summary
     print_verbose_training_complete(run_path)
 
 

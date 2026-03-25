@@ -19,7 +19,7 @@ class BestModelSaveCallback(L.Callback):
             save_path: Path to save the best model
         """
         super().__init__()
-        self.save_path = Path(save_path)
+        self.save_path = save_path / "best_model.pt"
         self.best_val_loss = float("inf")
         self._pending_save = None
         self._executor = ThreadPoolExecutor(
@@ -58,7 +58,7 @@ class BestModelSaveCallback(L.Callback):
 
         checkpoint = {
             "model_state_dict": state_dict,
-            "model_config": pl_module.get_model_config(), # type: ignore
+            "model_config": pl_module.get_model_config(),  # type: ignore
             "hyperparameters": dict(pl_module.hparams),
             "best_val_loss": self.best_val_loss,
         }

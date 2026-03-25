@@ -19,7 +19,12 @@ def set_seed(seed: int):
 
 def setup_run(args):
     set_seed(args.seed)
+
     run_path = create_output_folder(args.output_dir, args.run_name)
+
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("medium")
+
     print(f"\n{'=' * 60}")
     print(f"Training run: {run_path.name}")
     print(f"Output folder: {run_path.absolute()}")
