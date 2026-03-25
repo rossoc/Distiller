@@ -40,6 +40,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict
+import torch
 
 import optuna
 from optuna.pruners import MedianPruner
@@ -195,7 +196,7 @@ def parse_args():
         "--epochs", type=int, default=50, help="Number of training epochs"
     )
     parser.add_argument(
-        "--batch_size", type=int, default=32, help="Training batch size"
+        "--batch_size", type=int, default=64, help="Training batch size"
     )
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
     parser.add_argument(
@@ -240,7 +241,7 @@ def parse_args():
     parser.add_argument(
         "--precision",
         type=str,
-        default="32-true",
+        default="bf16-mixed",
         choices=[
             "64",
             "32-true",
@@ -625,6 +626,9 @@ def run_optimization(
 def main():
     args = parse_args()
 
+    if torch.cuda.is_available():
+        torch.set_float32_matmul_precision("medium")
+
     # Create study directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     study_name = args.study_name or f"study_{timestamp}"
@@ -637,7 +641,6 @@ def main():
     print(f"Study name: {study_name}")
     print(f"Output directory: {study_output_dir.absolute()}")
     print(f"Number of trials: {args.n_trials}")
-    print(f"Parallel trials: {args.n_parallel}")
     print(f"{'=' * 60}\n")
 
     # Create sampler and pruner
