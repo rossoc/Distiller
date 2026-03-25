@@ -57,6 +57,9 @@ from lightning.pytorch.callbacks import EarlyStopping, RichProgressBar
 from model.diffusion_trainer import DiffusionTrainer
 from model.callback import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
+from data.dataset import EmbeddingDecoderDataset
+from data.util import load_dataset
+from model.encoder import gemma_encoder
 from util.logger import log_training_config
 from util.randomness import set_seed
 
@@ -355,6 +358,9 @@ def run_trial(
     trial: optuna.Trial,
     args: argparse.Namespace,
     study_output_dir: Path,
+    train_dataset: EmbeddingDecoderDataset,
+    eval_dataset: EmbeddingDecoderDataset,
+    test_dataset: EmbeddingDecoderDataset,
 ) -> float:
     """
     Run a single Optuna trial.
@@ -363,6 +369,9 @@ def run_trial(
         trial: Optuna trial object
         args: Command-line arguments
         study_output_dir: Output directory for the study
+        train_dataset: Pre-computed training dataset
+        eval_dataset: Pre-computed evaluation dataset
+        test_dataset: Pre-computed test dataset
 
     Returns:
         Validation loss to optimize
@@ -383,7 +392,7 @@ def run_trial(
     args.run_name = f"trial_{trial.number:03d}"
     args.output_dir = str(run_path.parent)
 
-    # Create data module
+    # Create data module with pre-computed datasets
     datamodule = EmbeddingDecoderDataModule(
         train_ratio=args.train_ratio,
         eval_ratio=args.eval_ratio,
@@ -392,6 +401,9 @@ def run_trial(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=trial_seed,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        test_dataset=test_dataset,
     )
 
     # Create Lightning module with suggested hyperparameters
@@ -518,9 +530,42 @@ def run_trial(
 
         return best_val_loss
     finally:
-        # Clean up WandB run to prevent issues with subsequent trials
+        # Clean up WandB run
         if wandb_run is not None:
             wandb_run.finish()
+            wandb_run = None
+
+        # Clean up logger
+        if "logger" in locals() and logger is not False:
+            logger = None
+
+        # Clean up GPU memory between trials
+        import gc
+        import torch
+
+        # Delete large objects explicitly
+        if "model" in locals():
+            del model
+        if "trainer" in locals():
+            del trainer
+        if "datamodule" in locals():
+            del datamodule
+        if "best_model_callback" in locals():
+            del best_model_callback
+        if "pruning_callback" in locals():
+            del pruning_callback
+        if "early_stopping_callback" in locals():
+            del early_stopping_callback
+        if "progress_bar_callback" in locals():
+            del progress_bar_callback
+
+        # Synchronize CUDA before clearing cache
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+
+        # Force garbage collection
+        gc.collect()
 
 
 def save_study_results(study: optuna.Study, output_dir: Path):
@@ -605,6 +650,9 @@ def run_optimization(
     study: optuna.Study,
     args: argparse.Namespace,
     study_output_dir: Path,
+    train_dataset: EmbeddingDecoderDataset,
+    eval_dataset: EmbeddingDecoderDataset,
+    test_dataset: EmbeddingDecoderDataset,
 ):
     """
     Run Optuna optimization trials sequentially.
@@ -613,9 +661,14 @@ def run_optimization(
         study: Optuna study object
         args: Command-line arguments
         study_output_dir: Output directory for the study
+        train_dataset: Pre-computed training dataset
+        eval_dataset: Pre-computed evaluation dataset
+        test_dataset: Pre-computed test dataset
     """
     study.optimize(
-        lambda trial: run_trial(trial, args, study_output_dir),
+        lambda trial: run_trial(
+            trial, args, study_output_dir, train_dataset, eval_dataset, test_dataset
+        ),
         n_trials=args.n_trials,
         timeout=args.timeout * 3600 if args.timeout else None,
         show_progress_bar=True,
@@ -637,7 +690,40 @@ def main():
     print(f"Study name: {study_name}")
     print(f"Output directory: {study_output_dir.absolute()}")
     print(f"Number of trials: {args.n_trials}")
-    print(f"Parallel trials: {args.n_parallel}")
+    print(f"{'=' * 60}\n")
+
+    # Pre-compute embeddings ONCE before the study starts
+    # This avoids loading the encoder and re-computing embeddings for each trial
+    print("Pre-computing embeddings (this may take a while)...")
+    encoder = gemma_encoder()
+    
+    # Load raw text data
+    train_data, eval_data, test_data = load_dataset(
+        (args.train_ratio, args.eval_ratio, args.test_ratio), "simple_diffusion"
+    )
+    
+    # Create datasets with pre-computed embeddings
+    train_dataset = EmbeddingDecoderDataset(
+        train_data[0], train_data[1], encoder, args.max_length
+    )
+    eval_dataset = EmbeddingDecoderDataset(
+        eval_data[0], eval_data[1], encoder, args.max_length
+    )
+    test_dataset = EmbeddingDecoderDataset(
+        test_data[0], test_data[1], encoder, args.max_length
+    )
+    
+    # Delete encoder to free memory (no longer needed)
+    del encoder
+    
+    # Force garbage collection after pre-computing
+    import gc
+    gc.collect()
+    
+    print("Embeddings pre-computed successfully!")
+    print(f"  Train samples: {len(train_dataset)}")
+    print(f"  Eval samples: {len(eval_dataset)}")
+    print(f"  Test samples: {len(test_dataset)}")
     print(f"{'=' * 60}\n")
 
     # Create sampler and pruner
@@ -658,7 +744,9 @@ def main():
     print("Optimizing for minimum validation loss")
 
     # Run optimization
-    run_optimization(study, args, study_output_dir)
+    run_optimization(
+        study, args, study_output_dir, train_dataset, eval_dataset, test_dataset
+    )
 
     # Print results
     print(f"\n{'=' * 60}")

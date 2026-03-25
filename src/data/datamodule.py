@@ -2,7 +2,7 @@
 Lightning data module for the Embedding Decoder dataset.
 """
 
-from typing import Optional
+from typing import Optional, List, Tuple, Any
 from torch.utils.data import DataLoader
 import lightning as L
 
@@ -36,6 +36,10 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 0,
         seed: int = 42,
+        # Optional: pass pre-computed datasets to avoid re-encoding
+        train_dataset: Optional[EmbeddingDecoderDataset] = None,
+        eval_dataset: Optional[EmbeddingDecoderDataset] = None,
+        test_dataset: Optional[EmbeddingDecoderDataset] = None,
     ):
         """
         Initialize the data module.
@@ -49,6 +53,9 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             batch_size: Batch size for data loading
             num_workers: Number of workers for data loading
             seed: Random seed for reproducibility
+            train_dataset: Pre-computed training dataset (optional)
+            eval_dataset: Pre-computed evaluation dataset (optional)
+            test_dataset: Pre-computed test dataset (optional)
         """
         super().__init__()
 
@@ -61,8 +68,13 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         self.seed = seed
 
-        # Datasets will be created in setup()
-        self.encoder = gemma_encoder()
+        # Optional pre-computed datasets
+        self._train_dataset = train_dataset
+        self._eval_dataset = eval_dataset
+        self._test_dataset = test_dataset
+
+        # Encoder is only needed if datasets are not pre-computed
+        self.encoder = None if train_dataset is not None else gemma_encoder()
         self.train_data = None
         self.eval_data = None
         self.test_data = None
@@ -83,12 +95,30 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         """
         set_seed(self.seed)
 
-        self.train_data, self.eval_data, self.test_data = load_dataset(
-            (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
-        )
+        # Use pre-computed datasets if provided
+        if self._train_dataset is not None:
+            self.train_dataset = self._train_dataset
+            self.eval_dataset = self._eval_dataset
+            self.test_dataset = self._test_dataset
+        else:
+            # Load raw text data and create datasets on-the-fly
+            self.train_data, self.eval_data, self.test_data = load_dataset(
+                (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
+            )
 
     def _build_dataloader(self, X, y, shuffle=True) -> DataLoader:
-        dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length)
+        # If datasets are pre-computed, use them directly
+        if self._train_dataset is not None:
+            # Use the pre-computed dataset
+            if shuffle:
+                dataset = self.train_dataset
+            elif self.eval_dataset is not None and not shuffle:
+                dataset = self.eval_dataset
+            else:
+                dataset = self.test_dataset
+        else:
+            # Create dataset on-the-fly from raw text
+            dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length)
 
         return DataLoader(
             dataset,
@@ -102,28 +132,78 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         """Return the training dataloader."""
-        X_train, y_train = self.train_data  # type: ignore
-        return self._build_dataloader(X_train, y_train)
+        if self._train_dataset is not None:
+            # Use pre-computed dataset directly
+            return DataLoader(
+                self._train_dataset,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                collate_fn=embedding_collate_fn,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            X_train, y_train = self.train_data  # type: ignore
+            return self._build_dataloader(X_train, y_train)
 
     def val_dataloader(self) -> DataLoader:
         """Return the validation dataloader."""
-        X_eval, y_eval = self.eval_data  # type: ignore
-        return self._build_dataloader(X_eval, y_eval, shuffle=False)
+        if self._eval_dataset is not None:
+            # Use pre-computed dataset directly
+            return DataLoader(
+                self._eval_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=embedding_collate_fn,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            X_eval, y_eval = self.eval_data  # type: ignore
+            return self._build_dataloader(X_eval, y_eval, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
         """Return the test dataloader."""
-        X_test, y_test = self.test_data  # type: ignore
-        return self._build_dataloader(X_test, y_test, shuffle=False)
+        if self._test_dataset is not None:
+            # Use pre-computed dataset directly
+            return DataLoader(
+                self._test_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=self.num_workers,
+                collate_fn=embedding_collate_fn,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            X_test, y_test = self.test_data  # type: ignore
+            return self._build_dataloader(X_test, y_test, shuffle=False)
 
     def get_dataset_info(self) -> dict:
         """Get information about the datasets."""
-        return {
-            "train_ratio": self.train_ratio,
-            "eval_ratio": self.eval_ratio,
-            "test_ratio": self.test_ratio,
-            "data_schema": self.data_schema,
-            "max_length": self.max_length,
-            "train_samples": len(self.train_data[0]) if self.train_data else 0,
-            "eval_samples": len(self.eval_data[0]) if self.eval_data else 0,
-            "test_samples": len(self.test_data[0]) if self.test_data else 0,
-        }
+        if self._train_dataset is not None:
+            # Use pre-computed datasets
+            return {
+                "train_ratio": self.train_ratio,
+                "eval_ratio": self.eval_ratio,
+                "test_ratio": self.test_ratio,
+                "data_schema": self.data_schema,
+                "max_length": self.max_length,
+                "train_samples": len(self._train_dataset),
+                "eval_samples": len(self._eval_dataset) if self._eval_dataset else 0,
+                "test_samples": len(self._test_dataset) if self._test_dataset else 0,
+            }
+        else:
+            # Use raw text data
+            return {
+                "train_ratio": self.train_ratio,
+                "eval_ratio": self.eval_ratio,
+                "test_ratio": self.test_ratio,
+                "data_schema": self.data_schema,
+                "max_length": self.max_length,
+                "train_samples": len(self.train_data[0]) if self.train_data else 0,
+                "eval_samples": len(self.eval_data[0]) if self.eval_data else 0,
+                "test_samples": len(self.test_data[0]) if self.test_data else 0,
+            }
