@@ -20,7 +20,6 @@ Usage:
 import argparse
 import json
 import os
-import sys
 from pathlib import Path
 from datetime import datetime
 from typing import List, Tuple
@@ -28,9 +27,6 @@ from typing import List, Tuple
 import numpy as np
 import torch
 from tqdm import tqdm
-
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent))
 
 from model.encoder import gemma_encoder
 from model.decoder import Decoder
