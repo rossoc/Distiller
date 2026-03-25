@@ -56,7 +56,7 @@ class EmbeddingDecoderDataset(Dataset):
         all_embeddings = []
 
         # Process in chunks of batch_size
-        pbar = trange(0, len(texts), self.batch_size, leave=True, desc=is_input)
+        pbar = trange(0, len(texts), self.batch_size, leave=False, desc=is_input)
         for i in pbar:
             batch = texts[i : i + self.batch_size]
 
@@ -178,3 +178,4 @@ def build_faiss_index_from_dataset(
     )
 
     return retriever
+
