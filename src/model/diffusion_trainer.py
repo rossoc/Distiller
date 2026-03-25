@@ -10,7 +10,7 @@ import lightning as L
 from torch.optim.lr_scheduler import OneCycleLR
 from dataclasses import dataclass
 
-from typing import Optional
+from typing import Optional, Dict, Any
 from model.decoder import Decoder
 
 
@@ -264,6 +264,108 @@ class DiffusionTrainer(L.LightningModule):
             "num_heads": self.hparams.num_heads,
             "dropout": self.hparams.dropout,
         }
+
+    @classmethod
+    def from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        device: str = "cpu",
+        strict: bool = True,
+    ) -> "DiffusionTrainer":
+        """
+        Load a DiffusionTrainer model from a checkpoint file.
+
+        Handles multiple checkpoint formats:
+        - Custom format (model_state_dict, model_config, hyperparameters)
+        - Standard Lightning format (state_dict, hyper_parameters)
+
+        Args:
+            checkpoint_path: Path to the .ckpt or .pt model file
+            device: Device to load the model on (default: "cpu")
+            strict: Whether to strictly enforce that the keys match
+
+        Returns:
+            Loaded DiffusionTrainer model in eval mode
+
+        Example:
+            >>> model = DiffusionTrainer.from_checkpoint("outputs/best_model.pt", device="cuda")
+        """
+        print(f"Loading model from: {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+
+        # Extract hyperparameters - try multiple formats
+        if "hyperparameters" in checkpoint:
+            hparams = checkpoint["hyperparameters"]
+            print("Loaded hyperparameters (custom format)")
+        elif "hyper_parameters" in checkpoint:
+            hparams = checkpoint["hyper_parameters"]
+            print("Loaded hyperparameters (Lightning format)")
+        elif "model_config" in checkpoint:
+            hparams = checkpoint.get("model_config", {})
+            print("Loaded model_config (fallback format)")
+        else:
+            # Fallback to default config
+            hparams = {
+                "output_dim": 768,
+                "emb_dim": 768,
+                "num_layers": 6,
+                "fwd_dim": 2048,
+                "num_heads": 8,
+                "dropout": 0.1,
+                "learning_rate": 1e-4,
+                "weight_decay": 0.01,
+                "loss_alpha": 0.5,
+                "gradient_clip_val": 1.0,
+                "use_warmup": True,
+                "warmup_epochs": 5,
+            }
+            print("Using default hyperparameters (not found in checkpoint)")
+
+        # Create model from hyperparameters
+        model = cls(
+            output_dim=hparams.get("output_dim", 768),
+            emb_dim=hparams.get("emb_dim", 768),
+            num_layers=hparams.get("num_layers", 6),
+            fwd_dim=hparams.get("fwd_dim", 2048),
+            num_heads=hparams.get("num_heads", 8),
+            dropout=hparams.get("dropout", 0.1),
+            learning_rate=hparams.get("learning_rate", 1e-4),
+            weight_decay=hparams.get("weight_decay", 0.01),
+            loss_alpha=hparams.get("loss_alpha", 0.5),
+            gradient_clip_val=hparams.get("gradient_clip_val", 1.0),
+            use_warmup=hparams.get("use_warmup", True),
+            warmup_epochs=hparams.get("warmup_epochs", 5),
+        )
+
+        # Load state dict - handle multiple formats
+        if "model_state_dict" in checkpoint:
+            # Custom format: model_state_dict contains Decoder weights with "model." prefix
+            state_dict = checkpoint["model_state_dict"]
+            # Strip "model." prefix to get plain Decoder weights
+            state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+            print("Loaded state dict (custom format, stripped 'model.' prefix)")
+        elif "state_dict" in checkpoint:
+            # Standard Lightning format
+            state_dict = checkpoint["state_dict"]
+            # Strip "model." prefix if present
+            state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
+            print("Loaded state dict (Lightning format)")
+        else:
+            # Fallback: assume checkpoint is the state dict itself
+            state_dict = checkpoint
+            print("Loaded state dict (raw format)")
+
+        model.model.load_state_dict(state_dict, strict=strict)
+        model.to(device)
+        model.eval()
+
+        print("Model loaded successfully")
+        print(f"  - Layers: {hparams.get('num_layers', 6)}")
+        print(f"  - Embedding dim: {hparams.get('emb_dim', 768)}")
+        print(f"  - Feed-forward dim: {hparams.get('fwd_dim', 2048)}")
+        print(f"  - Heads: {hparams.get('num_heads', 8)}")
+
+        return model
 
 
 def cosine_similarity(

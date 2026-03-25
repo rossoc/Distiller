@@ -44,7 +44,9 @@ from torch.utils.data import DataLoader
 
 def load_model(model_path: str, device: str = "cpu") -> DiffusionTrainer:
     """
-    Load a trained DiffusionTrainer model from Lightning checkpoint.
+    Load a trained DiffusionTrainer model from checkpoint.
+
+    Wrapper around DiffusionTrainer.from_checkpoint for backward compatibility.
 
     Args:
         model_path: Path to the .ckpt or .pt model file
@@ -53,69 +55,7 @@ def load_model(model_path: str, device: str = "cpu") -> DiffusionTrainer:
     Returns:
         Loaded DiffusionTrainer model
     """
-    print(f"Loading model from: {model_path}")
-    checkpoint = torch.load(model_path, map_location=device, weights_only=True)
-
-    # Extract hyperparameters from Lightning checkpoint
-    if "hyper_parameters" in checkpoint:
-        hparams = checkpoint["hyper_parameters"]
-        print(f"Loaded hyperparameters: {hparams}")
-    elif "hparams" in checkpoint:
-        hparams = checkpoint["hparams"]
-    else:
-        # Fallback to default config
-        hparams = {
-            "output_dim": 768,
-            "emb_dim": 768,
-            "num_layers": 6,
-            "fwd_dim": 2048,
-            "num_heads": 8,
-            "dropout": 0.1,
-            "learning_rate": 1e-4,
-            "weight_decay": 0.01,
-            "loss_alpha": 0.5,
-            "gradient_clip_val": 1.0,
-            "use_warmup": True,
-            "warmup_epochs": 5,
-        }
-        print("Using default hyperparameters (not found in checkpoint)")
-
-    # Create model from hyperparameters
-    model = DiffusionTrainer(
-        output_dim=hparams.get("output_dim", 768),
-        emb_dim=hparams.get("emb_dim", 768),
-        num_layers=hparams.get("num_layers", 6),
-        fwd_dim=hparams.get("fwd_dim", 2048),
-        num_heads=hparams.get("num_heads", 8),
-        dropout=hparams.get("dropout", 0.1),
-        learning_rate=hparams.get("learning_rate", 1e-4),
-        weight_decay=hparams.get("weight_decay", 0.01),
-        loss_alpha=hparams.get("loss_alpha", 0.5),
-        gradient_clip_val=hparams.get("gradient_clip_val", 1.0),
-        use_warmup=hparams.get("use_warmup", True),
-        warmup_epochs=hparams.get("warmup_epochs", 5),
-    )
-
-    # Load state dict
-    # Lightning checkpoints have "state_dict" key with model.* prefixed keys
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-        # Strip "model." prefix if present (for the inner Decoder)
-        state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
-    else:
-        state_dict = checkpoint
-
-    model.model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-
-    print(f"Model loaded successfully")
-    print(f"  - Layers: {hparams.get('num_layers', 6)}")
-    print(f"  - Embedding dim: {hparams.get('emb_dim', 768)}")
-    print(f"  - Feed-forward dim: {hparams.get('fwd_dim', 2048)}")
-    print(f"  - Heads: {hparams.get('num_heads', 8)}")
-
-    return model
+    return DiffusionTrainer.from_checkpoint(model_path, device=device)
 
 
 def build_faiss_index(
