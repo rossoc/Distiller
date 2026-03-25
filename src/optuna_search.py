@@ -7,6 +7,10 @@ This script uses Optuna to search for optimal hyperparameters:
 - num_layers: Number of transformer decoder layers
 - fwd_dim: Feed-forward dimension
 - learning_rate: Learning rate for optimizer
+- weight_decay: Weight decay for optimizer
+- dropout: Dropout rate
+- loss_alpha: Weight for MSE loss in combined loss
+- label_smoothing: Label smoothing factor
 
 Multiple trials can be run in parallel to utilize available GPU/CPU resources.
 
@@ -49,10 +53,10 @@ from optuna.visualization import (
 import lightning as L
 from lightning.pytorch.callbacks import EarlyStopping, RichProgressBar
 
-from model.diffusion import EmbeddingDecoderLightning
-from model.lightning_interfaces import BestModelSaveCallback
+from model.diffusion_trainer import DiffusionTrainer
+from model.callback import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
-from util.logger import save_training_config
+from util.logger import log_training_config
 from util.randomness import set_seed
 
 
@@ -98,21 +102,21 @@ def parse_args():
         "--num_heads_choices",
         type=int,
         nargs="+",
-        default=[8, 16, 32, 64],
-        help="Choices for num_heads (default: 4 8 12 16)",
+        default=[4, 8, 16, 32],
+        help="Choices for num_heads (default: 4 8 16 32)",
     )
     parser.add_argument(
         "--num_layers_choices",
         type=int,
         nargs="+",
-        default=[2, 4, 8, 16],
+        default=[2, 4, 6, 8],
         help="Choices for num_layers (default: 2 4 6 8)",
     )
     parser.add_argument(
         "--fwd_dim_choices",
         type=int,
         nargs="+",
-        default=[1024, 516, 2048, 4096],
+        default=[1024, 2048, 3072, 4096],
         help="Choices for fwd_dim (default: 1024 2048 3072 4096)",
     )
     parser.add_argument(
@@ -126,6 +130,18 @@ def parse_args():
         type=float,
         default=5e-4,
         help="Maximum learning rate for log-uniform search (default: 5e-4)",
+    )
+    parser.add_argument(
+        "--weight_decay_min",
+        type=float,
+        default=1e-4,
+        help="Minimum weight decay for log-uniform search (default: 1e-4)",
+    )
+    parser.add_argument(
+        "--weight_decay_max",
+        type=float,
+        default=1e-1,
+        help="Maximum weight decay for log-uniform search (default: 1e-1)",
     )
     parser.add_argument(
         "--dropout_choices",
@@ -177,13 +193,6 @@ def parse_args():
     # Model arguments (fixed, not optimized)
     parser.add_argument(
         "--emb_dim", type=int, default=768, help="Model embedding dimension"
-    )
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout rate")
-    parser.add_argument(
-        "--use_layer_norm",
-        action="store_true",
-        default=True,
-        help="Use pre-normalization",
     )
 
     # Training arguments
@@ -329,6 +338,9 @@ def suggest_hyperparameters(
         "learning_rate": trial.suggest_float(
             "learning_rate", args.lr_min, args.lr_max, log=True
         ),
+        "weight_decay": trial.suggest_float(
+            "weight_decay", args.weight_decay_min, args.weight_decay_max, log=True
+        ),
         "dropout": trial.suggest_categorical("dropout", args.dropout_choices),
         "loss_alpha": trial.suggest_categorical("loss_alpha", args.loss_alpha_choices),
         "label_smoothing": trial.suggest_categorical(
@@ -388,7 +400,7 @@ def run_trial(
     )
 
     # Create Lightning module with suggested hyperparameters
-    model = EmbeddingDecoderLightning(
+    model = DiffusionTrainer(
         output_dim=768,
         emb_dim=args.emb_dim,
         num_layers=hparams["num_layers"],
@@ -396,13 +408,11 @@ def run_trial(
         num_heads=hparams["num_heads"],
         dropout=hparams["dropout"],
         learning_rate=hparams["learning_rate"],
-        weight_decay=args.weight_decay,
+        weight_decay=hparams["weight_decay"],
         loss_alpha=hparams["loss_alpha"],
-        label_smoothing=hparams["label_smoothing"],
         gradient_clip_val=args.gradient_clip_val,
         use_warmup=args.use_warmup,
         warmup_epochs=args.warmup_epochs,
-        use_layer_norm=args.use_layer_norm,
     )
 
     # Set hyperparameters on args for save_training_config
@@ -410,6 +420,7 @@ def run_trial(
     args.fwd_dim = hparams["fwd_dim"]
     args.num_heads = hparams["num_heads"]
     args.learning_rate = hparams["learning_rate"]
+    args.weight_decay = hparams["weight_decay"]
     args.dropout = hparams["dropout"]
     args.loss_alpha = hparams["loss_alpha"]
     args.label_smoothing = hparams["label_smoothing"]
@@ -468,15 +479,16 @@ def run_trial(
         val_check_interval=args.val_check_interval,
         callbacks=callbacks,
         logger=logger,
-        enable_checkpointing=True,
         enable_progress_bar=not args.disable_progress_bar,
-        enable_model_summary=not args.disable_progress_bar,
+        enable_model_summary=True,
+        gradient_clip_val=args.gradient_clip_val,
+        gradient_clip_algorithm="norm",
     )
 
     # Setup data and save config
     datamodule.setup()
     data_info = datamodule.get_dataset_info()
-    save_training_config(run_path, args, data_info)
+    log_training_config(run_path, args, data_info)
 
     # Save trial-specific hyperparameters
     trial_config = {

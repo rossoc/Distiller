@@ -63,6 +63,7 @@ def log_training_config(run_path: Path, args: argparse.Namespace, data_info: dic
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "weight_decay": args.weight_decay,
+            "loss-alpha": args.loss_alpha,
             "precision": args.precision,
             "min_epochs": args.min_epochs,
             "min_steps": args.min_steps,
