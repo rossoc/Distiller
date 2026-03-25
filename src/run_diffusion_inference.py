@@ -28,7 +28,7 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -37,25 +37,9 @@ from tqdm import tqdm
 from model.diffusion_trainer import DiffusionTrainer
 from model.faiss_retriever import FAISSRetriever
 from data.datamodule import EmbeddingDecoderDataModule
-from data.dataset import EmbeddingDecoderDataset, embedding_collate_fn
+from data.dataset import EmbeddingDecoderDataset
 from util.randomness import set_seed
 from torch.utils.data import DataLoader
-
-
-def load_model(model_path: str, device: str = "cpu") -> DiffusionTrainer:
-    """
-    Load a trained DiffusionTrainer model from checkpoint.
-
-    Wrapper around DiffusionTrainer.from_checkpoint for backward compatibility.
-
-    Args:
-        model_path: Path to the .ckpt or .pt model file
-        device: Device to load the model on
-
-    Returns:
-        Loaded DiffusionTrainer model
-    """
-    return DiffusionTrainer.from_checkpoint(model_path, device=device)
 
 
 def build_faiss_index(
@@ -157,7 +141,9 @@ def run_predictions(
             else:
                 # Input is shorter, repeat and pad
                 repeats = (max_tgt_len // input_embeddings.shape[1]) + 1
-                init_tgt = input_embeddings.repeat(1, repeats, 1)[:, :max_tgt_len, :].clone()
+                init_tgt = input_embeddings.repeat(1, repeats, 1)[
+                    :, :max_tgt_len, :
+                ].clone()
 
             # Add some noise to avoid exact copies (optional, can help with diversity)
             # noise = torch.randn_like(init_tgt) * 0.1
@@ -175,11 +161,13 @@ def run_predictions(
             # Mean pool to get single vector per sample for FAISS
             # Apply mask to ignore padding tokens
             output_mask = (~tgt_mask).unsqueeze(-1).float()
-            pooled_output = (output * output_mask).sum(dim=1) / output_mask.sum(dim=1).clamp(min=1)
+            pooled_output = (output * output_mask).sum(dim=1) / output_mask.sum(
+                dim=1
+            ).clamp(min=1)
 
             # Move to CPU and store
             pooled_output = pooled_output.cpu().numpy()
-            
+
             # Store full predictions as list (variable sequence lengths)
             for i in range(batch_size):
                 seq_len = tgt_mask[i].sum().item()
@@ -355,7 +343,7 @@ def main():
     print(f"Using device: {device}")
 
     # Load model
-    model = load_model(args.model_path, device)
+    model = DiffusionTrainer.from_checkpoint(args.model_path, device=device)
 
     # Setup data module (same as training)
     print("\nLoading test dataset...")
