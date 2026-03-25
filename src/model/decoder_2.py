@@ -68,6 +68,12 @@ class Decoder2(nn.Module):
         memory_mask: Optional[torch.Tensor] = None,
         tgt_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        # Ensure masks are boolean type
+        if memory_mask is not None:
+            memory_mask = memory_mask.bool()
+        if tgt_mask is not None:
+            tgt_mask = tgt_mask.bool()
+        
         x = self.decoder(
             tgt,
             memory,
