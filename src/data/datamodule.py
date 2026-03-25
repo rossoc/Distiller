@@ -87,13 +87,13 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
         )
 
-    def _build_dataloader(self, X, y) -> DataLoader:
+    def _build_dataloader(self, X, y, shuffle=True) -> DataLoader:
         dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length)
 
         return DataLoader(
             dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=self.num_workers,
             collate_fn=embedding_collate_fn,
             pin_memory=True,
@@ -108,12 +108,12 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         """Return the validation dataloader."""
         X_eval, y_eval = self.eval_data  # type: ignore
-        return self._build_dataloader(X_eval, y_eval)
+        return self._build_dataloader(X_eval, y_eval, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:
         """Return the test dataloader."""
         X_test, y_test = self.test_data  # type: ignore
-        return self._build_dataloader(X_test, y_test)
+        return self._build_dataloader(X_test, y_test, shuffle=False)
 
     def get_dataset_info(self) -> dict:
         """Get information about the datasets."""

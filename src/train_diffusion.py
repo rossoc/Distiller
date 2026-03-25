@@ -188,7 +188,7 @@ def parse_args():
 
     # Logging arguments
     parser.add_argument(
-        "--log_every_n_steps", type=int, default=50, help="Log every N steps"
+        "--log_every_n_steps", type=int, default=10, help="Log every N steps"
     )
     parser.add_argument(
         "--val_check_interval",
@@ -276,6 +276,8 @@ def main():
         logger=logger,
         enable_progress_bar=not args.disable_progress_bar,
         enable_model_summary=True,
+        gradient_clip_val=args.gradient_clip_val,
+        gradient_clip_algorithm="norm",
     )
 
     # Save training config (after data module setup to get dataset info)

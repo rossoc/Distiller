@@ -247,17 +247,12 @@ class DiffusionTrainer(L.LightningModule):
                 "frequency": 1,
             }
 
-        # Configure gradient clipping
-        optimizer_config = {
+        # Configure optimizer and scheduler
+        # Note: gradient clipping is handled by Trainer via trainer.clip_grad_val
+        return {
             "optimizer": optimizer,
             "lr_scheduler": scheduler_config,
         }
-
-        if self.hparams.gradient_clip_val > 0:
-            optimizer_config["gradient_clip_val"] = self.hparams.gradient_clip_val
-            optimizer_config["gradient_clip_algorithm"] = "norm"
-
-        return optimizer_config
 
     def get_model_config(self):
         """Get the model configuration as a dictionary."""
