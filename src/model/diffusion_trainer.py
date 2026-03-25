@@ -112,7 +112,7 @@ class DiffusionTrainer(L.LightningModule):
             memory=input_embeddings,
             tgt=target_embeddings,
             memory_mask=memory_mask,
-            tgt_padding_mask=tgt_mask,
+            tgt_mask=tgt_mask,
         )
 
         # Compute loss
