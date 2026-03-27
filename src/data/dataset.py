@@ -18,8 +18,8 @@ class EmbeddingDecoderDataset(Dataset):
     Dataset for training the embedding decoder.
 
     Each sample contains:
-    - input_embeddings: Embeddings of the input text (memory) - shape (seq_len, 768)
-    - target_embeddings: Embeddings of the target text - shape (seq_len, 768)
+    - input_embeddings: Embeddings of the input text (memory) - shape (seq_len, emb_dim)
+    - target_embeddings: Embeddings of the target text - shape (seq_len, emb_dim)
     - target_text: The target text string (for FAISS index building)
     """
 
@@ -30,6 +30,7 @@ class EmbeddingDecoderDataset(Dataset):
         encoder,
         max_length: int = 2048,
         batch_size: int = 64,
+        emb_dim: int = 768,
     ):
         """
         Initialize the dataset.
@@ -39,12 +40,15 @@ class EmbeddingDecoderDataset(Dataset):
             y_texts: List of target text strings
             encoder: Encoder model to convert text to embeddings
             max_length: Maximum sequence length for encoding
+            batch_size: Batch size for encoding
+            emb_dim: Embedding dimension (768 for gemma, 1024 for qwen)
         """
         self.X_texts = X_texts
         self.y_texts = y_texts
         self.encoder = encoder
         self.max_length = max_length
         self.batch_size = batch_size
+        self.emb_dim = emb_dim
 
         # Pre-compute all embeddings
         self.input_embeddings = self._encode_texts(X_texts, "Input")
@@ -84,7 +88,7 @@ class EmbeddingDecoderDataset(Dataset):
             except Exception as e:
                 # If a whole batch fails, we append zeros for each item in that batch
                 for _ in range(len(batch)):
-                    all_embeddings.append(np.zeros((1, 768), dtype=np.float32))
+                    all_embeddings.append(np.zeros((1, self.emb_dim), dtype=np.float32))
 
         return all_embeddings
 
@@ -116,8 +120,8 @@ def embedding_collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     max_input_len = max(sample["input_embeddings"].shape[0] for sample in batch)
     max_target_len = max(sample["target_embeddings"].shape[0] for sample in batch)
 
-    # Get embedding dimension (assume 768)
-    emb_dim = 768
+    # Infer embedding dimension from first sample
+    emb_dim = batch[0]["input_embeddings"].shape[1]
 
     # Create padded tensors
     input_embeddings = torch.zeros(

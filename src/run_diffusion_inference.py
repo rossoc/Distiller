@@ -36,6 +36,7 @@ from tqdm import tqdm
 
 from model.diffusion_trainer import DiffusionTrainer
 from model.faiss_retriever import FAISSRetriever
+from model.encoder import get_encoder_dim
 from data.datamodule import EmbeddingDecoderDataModule
 from data.dataset import EmbeddingDecoderDataset
 from util.randomness import set_seed
@@ -46,6 +47,7 @@ def build_faiss_index(
     texts: List[str],
     embeddings: List[np.ndarray],
     save_path: str,
+    emb_dim: int = 768,
 ) -> FAISSRetriever:
     """
     Build a FAISS index from texts and their embeddings.
@@ -55,8 +57,9 @@ def build_faiss_index(
 
     Args:
         texts: List of texts
-        embeddings: List of embedding arrays (seq_len, 768)
+        embeddings: List of embedding arrays (seq_len, emb_dim)
         save_path: Path to save the FAISS index
+        emb_dim: Embedding dimension (default: 768)
 
     Returns:
         FAISSRetriever with built index
@@ -66,13 +69,13 @@ def build_faiss_index(
     # Mean pool over sequence to get single vector per text
     pooled_embeddings = []
     for emb in embeddings:
-        pooled = emb.mean(axis=0)  # (768,)
+        pooled = emb.mean(axis=0)  # (emb_dim,)
         pooled_embeddings.append(pooled)
 
     pooled_embeddings = np.array(pooled_embeddings, dtype=np.float32)
 
     # Build retriever
-    retriever = FAISSRetriever(embedding_dim=768)
+    retriever = FAISSRetriever(embedding_dim=emb_dim)
     retriever.build_index(texts, pooled_embeddings)
     retriever.save(save_path)
 
@@ -293,6 +296,13 @@ def parse_args():
         "--batch_size", type=int, default=32, help="Batch size for inference"
     )
     parser.add_argument(
+        "--encoder",
+        type=str,
+        default="gemma",
+        choices=["gemma", "qwen"],
+        help="Encoder model to use (default: gemma)",
+    )
+    parser.add_argument(
         "--k", type=int, default=3, help="Number of nearest neighbors to retrieve"
     )
 
@@ -318,6 +328,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    # Compute embedding dimension from encoder choice
+    output_dim = get_encoder_dim(args.encoder)
 
     # Set seed
     set_seed(args.seed)
@@ -349,6 +362,7 @@ def main():
         batch_size=args.batch_size,
         num_workers=0,  # Use 0 for inference to avoid multiprocessing issues
         seed=args.seed,
+        encoder_name=args.encoder,
     )
     datamodule.setup()
 
@@ -369,6 +383,7 @@ def main():
             y_test.tolist(),
             encoder,
             args.max_length,
+            emb_dim=output_dim,
         )
 
         # Build index from target embeddings
@@ -376,6 +391,7 @@ def main():
             texts=test_dataset.y_texts,
             embeddings=test_dataset.target_embeddings,
             save_path=args.faiss_index_path,
+            emb_dim=output_dim,
         )
         print("\nFAISS index built successfully!")
         return

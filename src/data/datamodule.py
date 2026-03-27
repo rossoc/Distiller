@@ -10,7 +10,7 @@ from .util import (
     load_dataset,
 )
 
-from model.encoder import gemma_encoder
+from model.encoder import gemma_encoder, get_encoder_dim
 from .dataset import (
     EmbeddingDecoderDataset,
     embedding_collate_fn,
@@ -36,6 +36,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         batch_size: int = 32,
         num_workers: int = 0,
         seed: int = 42,
+        encoder_name: str = "gemma",
         # Optional: pass pre-computed datasets to avoid re-encoding
         train_dataset: Optional[EmbeddingDecoderDataset] = None,
         eval_dataset: Optional[EmbeddingDecoderDataset] = None,
@@ -53,6 +54,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
             batch_size: Batch size for data loading
             num_workers: Number of workers for data loading
             seed: Random seed for reproducibility
+            encoder_name: Name of encoder to use ("gemma" or "qwen")
             train_dataset: Pre-computed training dataset (optional)
             eval_dataset: Pre-computed evaluation dataset (optional)
             test_dataset: Pre-computed test dataset (optional)
@@ -67,6 +69,8 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.seed = seed
+        self.encoder_name = encoder_name
+        self.emb_dim = get_encoder_dim(encoder_name)
 
         # Optional pre-computed datasets
         self._train_dataset = train_dataset
@@ -118,7 +122,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
                 dataset = self.test_dataset
         else:
             # Create dataset on-the-fly from raw text
-            dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length)
+            dataset = EmbeddingDecoderDataset(X, y, self.encoder, self.max_length, emb_dim=self.emb_dim)
 
         return DataLoader(
             dataset,
