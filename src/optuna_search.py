@@ -60,7 +60,7 @@ from model.callback import BestModelSaveCallback
 from data.datamodule import EmbeddingDecoderDataModule
 from data.dataset import EmbeddingDecoderDataset
 from data.util import load_dataset
-from model.encoder import gemma_encoder
+from model.encoder import get_encoder_dim, encoder
 from util.logger import log_training_config
 from util.randomness import set_seed
 
@@ -188,11 +188,16 @@ def parse_args():
     parser.add_argument(
         "--test_ratio", type=float, default=0.4, help="Ratio of data for testing"
     )
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default="gemma",
+        choices=["gemma", "qwen"],
+        help="Encoder model to use (default: gemma)",
+    )
 
     # Model arguments (fixed, not optimized)
-    parser.add_argument(
-        "--emb_dim", type=int, default=768, help="Model embedding dimension"
-    )
+    # Note: emb_dim is now computed from encoder choice
 
     # Training arguments
     parser.add_argument(
@@ -402,15 +407,19 @@ def run_trial(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=trial_seed,
+        encoder_name=args.encoder,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         test_dataset=test_dataset,
     )
 
+    # Get embedding dimension from encoder choice
+    output_dim = get_encoder_dim(args.encoder)
+
     # Create Lightning module with suggested hyperparameters
     model = DiffusionTrainer(
-        output_dim=768,
-        emb_dim=args.emb_dim,
+        output_dim=output_dim,
+        emb_dim=output_dim,
         num_layers=hparams["num_layers"],
         fwd_dim=hparams["fwd_dim"],
         num_heads=hparams["num_heads"],
@@ -501,11 +510,14 @@ def run_trial(
     log_training_config(run_path, args, data_info)
 
     # Save trial-specific hyperparameters
+    output_dim = get_encoder_dim(args.encoder)
     trial_config = {
         "trial_number": trial.number,
         "hyperparameters": hparams,
         "fixed_params": {
-            "emb_dim": args.emb_dim,
+            "encoder": args.encoder,
+            "output_dim": output_dim,
+            "emb_dim": output_dim,
             "dropout": args.dropout,
             "weight_decay": args.weight_decay,
             "loss_alpha": args.loss_alpha,
@@ -699,26 +711,31 @@ def main():
     # Pre-compute embeddings ONCE before the study starts
     # This avoids loading the encoder and re-computing embeddings for each trial
     print("Pre-computing embeddings (this may take a while)...")
-    encoder = gemma_encoder()
     
+    # Get embedding dimension from encoder choice
+    output_dim = get_encoder_dim(args.encoder)
+    
+    # Load encoder for pre-computing embeddings
+    encoder_model = encoder(args.encoder)
+
     # Load raw text data
     train_data, eval_data, test_data = load_dataset(
         (args.train_ratio, args.eval_ratio, args.test_ratio), "simple_diffusion"
     )
-    
+
     # Create datasets with pre-computed embeddings
     train_dataset = EmbeddingDecoderDataset(
-        train_data[0], train_data[1], encoder, args.max_length
+        train_data[0], train_data[1], encoder_model, args.max_length, emb_dim=output_dim
     )
     eval_dataset = EmbeddingDecoderDataset(
-        eval_data[0], eval_data[1], encoder, args.max_length
+        eval_data[0], eval_data[1], encoder_model, args.max_length, emb_dim=output_dim
     )
     test_dataset = EmbeddingDecoderDataset(
-        test_data[0], test_data[1], encoder, args.max_length
+        test_data[0], test_data[1], encoder_model, args.max_length, emb_dim=output_dim
     )
-    
+
     # Delete encoder to free memory (no longer needed)
-    del encoder
+    del encoder_model
     
     # Force garbage collection after pre-computing
     import gc
