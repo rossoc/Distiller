@@ -24,6 +24,7 @@ from lightning.pytorch.loggers import WandbLogger
 
 from model.diffusion_trainer import DiffusionTrainer
 from model.callback import BestModelSaveCallback
+from model.encoder import get_encoder_dim
 from data.datamodule import EmbeddingDecoderDataModule
 from util.logger import log_training_config, log_test_results
 from util.randomness import setup_run
@@ -67,6 +68,13 @@ def parse_args():
     )
     parser.add_argument(
         "--test_ratio", type=float, default=0.4, help="Ratio of data for testing"
+    )
+    parser.add_argument(
+        "--encoder",
+        type=str,
+        default="gemma",
+        choices=["gemma", "qwen"],
+        help="Encoder model to use (default: gemma)",
     )
 
     # Model arguments
@@ -209,6 +217,9 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Compute embedding dimension from encoder choice
+    output_dim = get_encoder_dim(args.encoder)
+
     # Setup the run
     run_path = setup_run(args)
 
@@ -220,11 +231,12 @@ def main():
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
+        encoder_name=args.encoder,
     )
 
     model = DiffusionTrainer(
-        output_dim=768,
-        emb_dim=args.emb_dim,
+        output_dim=output_dim,
+        emb_dim=output_dim,
         num_layers=args.num_layers,
         fwd_dim=args.fwd_dim,
         num_heads=args.num_heads,

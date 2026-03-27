@@ -83,49 +83,27 @@ def run_predictions(
             memory_mask = batch["input_attention_mask"].to(device) == 0
             tgt_mask = batch["target_attention_mask"].to(device) == 0
 
-            batch_size = input_embeddings.shape[0]
-
-            # Get target sequence length
-            max_tgt_len = target_embeddings.shape[1]
-            # Limit output length if specified
-            if max_output_length is not None:
-                max_tgt_len = min(max_tgt_len, max_output_length)
-
-            # Create initial target from input (repeat/pad to match target length)
-            # This gives the model a starting point based on the input
-            if input_embeddings.shape[1] >= max_tgt_len:
-                # Input is longer, just truncate
-                init_tgt = input_embeddings[:, :max_tgt_len, :].clone()
-            else:
-                # Input is shorter, repeat and pad
-                repeats = (max_tgt_len // input_embeddings.shape[1]) + 1
-                init_tgt = input_embeddings.repeat(1, repeats, 1)[
-                    :, :max_tgt_len, :
-                ].clone()
-
-            # Create target mask for the initialized target
-            init_tgt_mask = tgt_mask[:, :max_tgt_len] if tgt_mask.shape[1] > max_tgt_len else tgt_mask.clone()
+            init_tgt = torch.zeros_like(target_embeddings)
 
             # Run forward pass
             output = model(
                 memory=input_embeddings,
                 tgt=init_tgt,
                 memory_padding_mask=memory_mask,
-                tgt_padding_mask=init_tgt_mask,
             )
 
             # Output shape: (batch, seq_len, 768)
             # Process each sample in the batch
-            for i in range(batch_size):
+            for i in range(tgt_mask.shape[0]):
                 # Get actual sequence length from mask
-                seq_len = init_tgt_mask[i].sum().item()
-                
+                seq_len = tgt_mask[i].sum().item()
+
                 # Extract the predicted embeddings for this sample
                 sample_embeddings = output[i, :seq_len, :].cpu().numpy()
-                
+
                 # Get attention mask (True = valid token)
-                sample_mask = (~init_tgt_mask[i]).cpu().numpy()
-                
+                sample_mask = (~tgt_mask[i]).cpu().numpy()
+
                 # Extract tokens using cosine similarity
                 # For fixed-length generation, we don't stop at EOS
                 result = extractor.extract_sequence(
@@ -134,16 +112,20 @@ def run_predictions(
                     stop_at_eos=stop_at_eos,
                     return_confidence=True,
                 )
-                
+
                 extraction_results.append(result)
                 full_predictions.append(sample_embeddings)
-            
+
             input_texts.extend(batch["input_text"])
             target_texts.extend(batch["target_text"])
 
     print(f"Generated {len(extraction_results)} predictions")
-    print(f"Average sequence length: {np.mean([r.sequence_length for r in extraction_results]):.1f}")
-    print(f"Average confidence: {np.mean([np.mean(r.confidence_scores) for r in extraction_results]):.3f}")
+    print(
+        f"Average sequence length: {np.mean([r.sequence_length for r in extraction_results]):.1f}"
+    )
+    print(
+        f"Average confidence: {np.mean([np.mean(r.confidence_scores) for r in extraction_results]):.3f}"
+    )
 
     return extraction_results, input_texts, target_texts, full_predictions
 
@@ -166,32 +148,36 @@ def compute_metrics(
     all_confidences = []
     for result in extraction_results:
         all_confidences.extend(result.confidence_scores)
-    
+
     confidence_stats = {
-        'mean': float(np.mean(all_confidences)),
-        'std': float(np.std(all_confidences)),
-        'min': float(np.min(all_confidences)),
-        'max': float(np.max(all_confidences)),
+        "mean": float(np.mean(all_confidences)),
+        "std": float(np.std(all_confidences)),
+        "min": float(np.min(all_confidences)),
+        "max": float(np.max(all_confidences)),
     }
-    
+
     # Sequence length statistics
     seq_lengths = [r.sequence_length for r in extraction_results]
     length_stats = {
-        'mean': float(np.mean(seq_lengths)),
-        'std': float(np.std(seq_lengths)),
-        'min': int(np.min(seq_lengths)),
-        'max': int(np.max(seq_lengths)),
+        "mean": float(np.mean(seq_lengths)),
+        "std": float(np.std(seq_lengths)),
+        "min": int(np.min(seq_lengths)),
+        "max": int(np.max(seq_lengths)),
     }
-    
+
     # Exact match rate (if predictions match ground truth exactly)
-    exact_matches = sum(1 for r, t in zip(extraction_results, target_texts) if r.text.strip() == t.strip())
+    exact_matches = sum(
+        1
+        for r, t in zip(extraction_results, target_texts)
+        if r.text.strip() == t.strip()
+    )
     exact_match_rate = exact_matches / len(target_texts)
-    
+
     return {
-        'confidence': confidence_stats,
-        'sequence_length': length_stats,
-        'exact_match_rate': exact_match_rate,
-        'total_samples': len(extraction_results),
+        "confidence": confidence_stats,
+        "sequence_length": length_stats,
+        "exact_match_rate": exact_match_rate,
+        "total_samples": len(extraction_results),
     }
 
 
@@ -225,7 +211,11 @@ def save_results(
             "tokens": extraction_results[i].tokens,
             "token_ids": extraction_results[i].token_ids,
             "confidence_scores": extraction_results[i].confidence_scores,
-            "average_confidence": float(np.mean(extraction_results[i].confidence_scores)) if extraction_results[i].confidence_scores else 0.0,
+            "average_confidence": float(
+                np.mean(extraction_results[i].confidence_scores)
+            )
+            if extraction_results[i].confidence_scores
+            else 0.0,
             "sequence_length": extraction_results[i].sequence_length,
         }
         results.append(result)
@@ -331,7 +321,9 @@ def main():
     # Load token extractor
     print("\nLoading token extractor...")
     extractor = TokenExtractor.from_gguf_model(args.gguf_model_path)
-    print(f"Token extractor loaded: vocab size = {extractor.vocab_size}, embedding dim = {extractor.embedding_dim}")
+    print(
+        f"Token extractor loaded: vocab size = {extractor.vocab_size}, embedding dim = {extractor.embedding_dim}"
+    )
 
     # Setup data module (same as training)
     print("\nLoading test dataset...")
@@ -366,9 +358,15 @@ def main():
     print("\n" + "=" * 60)
     print("Evaluation Metrics:")
     print("=" * 60)
-    print(f"Confidence (mean): {metrics['confidence']['mean']:.4f} ± {metrics['confidence']['std']:.4f}")
-    print(f"Sequence length (mean): {metrics['sequence_length']['mean']:.1f} ± {metrics['sequence_length']['std']:.1f}")
-    print(f"Exact match rate: {metrics['exact_match_rate']:.4f} ({int(metrics['exact_match_rate'] * len(target_texts))}/{len(target_texts)})")
+    print(
+        f"Confidence (mean): {metrics['confidence']['mean']:.4f} ± {metrics['confidence']['std']:.4f}"
+    )
+    print(
+        f"Sequence length (mean): {metrics['sequence_length']['mean']:.1f} ± {metrics['sequence_length']['std']:.1f}"
+    )
+    print(
+        f"Exact match rate: {metrics['exact_match_rate']:.4f} ({int(metrics['exact_match_rate'] * len(target_texts))}/{len(target_texts)})"
+    )
 
     # Create output directory
     output_dir = Path(args.output_dir)
