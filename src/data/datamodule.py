@@ -10,7 +10,7 @@ from .util import (
     load_dataset,
 )
 
-from model.encoder import gemma_encoder, get_encoder_dim
+from model.encoder import gemma_encoder, get_encoder_dim, encoder
 from .dataset import (
     EmbeddingDecoderDataset,
     embedding_collate_fn,
@@ -78,7 +78,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         self._test_dataset = test_dataset
 
         # Encoder is only needed if datasets are not pre-computed
-        self.encoder = None if train_dataset is not None else gemma_encoder()
+        self.encoder = None if train_dataset is not None else encoder(encoder_name)
         self.train_data = None
         self.eval_data = None
         self.test_data = None
