@@ -60,9 +60,13 @@ class EmbeddingDecoderDataset(Dataset):
         all_embeddings = []
         print(f"Processing {is_input} Embeddings")
 
+        # Use smaller batch size to avoid KV cache exhaustion
+        # Especially important for larger models like Qwen
+        encode_batch_size = min(self.batch_size, 16)
+
         # Process in chunks of batch_size
-        for i in range(0, len(texts), self.batch_size):
-            batch = texts[i : i + self.batch_size]
+        for i in range(0, len(texts), encode_batch_size):
+            batch = texts[i : i + encode_batch_size]
 
             try:
                 # 1. Batch Encode: Pass the whole list to the encoder
@@ -73,7 +77,7 @@ class EmbeddingDecoderDataset(Dataset):
                     if emb_list and len(emb_list) > 0:
                         token_embs = np.array(emb_list, dtype=np.float32)
 
-                        # Ensure 2D (sequence_length, 768)
+                        # Ensure 2D (sequence_length, emb_dim)
                         if token_embs.ndim == 1:
                             token_embs = token_embs.reshape(1, -1)
 
@@ -83,12 +87,25 @@ class EmbeddingDecoderDataset(Dataset):
 
                         all_embeddings.append(token_embs)
                     else:
-                        all_embeddings.append(np.zeros((1, 768), dtype=np.float32))
+                        all_embeddings.append(np.zeros((1, self.emb_dim), dtype=np.float32))
 
             except Exception as e:
-                # If a whole batch fails, we append zeros for each item in that batch
-                for _ in range(len(batch)):
-                    all_embeddings.append(np.zeros((1, self.emb_dim), dtype=np.float32))
+                # If batch encoding fails, fall back to per-sample encoding
+                print(f"  Batch encoding failed, falling back to per-sample: {e}")
+                for text in batch:
+                    try:
+                        emb_list = self.encoder.embed([text])[0]
+                        if emb_list and len(emb_list) > 0:
+                            token_embs = np.array(emb_list, dtype=np.float32)
+                            if token_embs.ndim == 1:
+                                token_embs = token_embs.reshape(1, -1)
+                            if len(token_embs) > self.max_length:
+                                token_embs = token_embs[: self.max_length]
+                            all_embeddings.append(token_embs)
+                        else:
+                            all_embeddings.append(np.zeros((1, self.emb_dim), dtype=np.float32))
+                    except Exception as inner_e:
+                        all_embeddings.append(np.zeros((1, self.emb_dim), dtype=np.float32))
 
         return all_embeddings
 

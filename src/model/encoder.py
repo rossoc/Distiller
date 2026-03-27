@@ -39,7 +39,7 @@ def gemma_encoder():
 def qwen_encoder():
     llm = LlamaEmbedding(
         model_path=str("models/Qwen3.5-0.8B-Q8_0.gguf"),
-        n_ctx=2048,
+        n_ctx=4096,  # Increased from 2048 to handle larger batches
         n_gpu_layers=0,  # CPU only
         verbose=False,
         pooling_type=LLAMA_POOLING_TYPE_NONE,
