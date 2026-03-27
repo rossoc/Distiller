@@ -87,3 +87,168 @@ python scripts/embed_to_text.py \
 | Llama-3-8B | 4096 | ~8B | Alternative architecture |
 
 To use a different decoder, change the `--decoder_model` argument during training.
+
+---
+
+## LLM Fine-tuning (LoRA/QLoRA)
+
+This project also supports fine-tuning large language models like **Qwen3.5-0.8B** using parameter-efficient methods (LoRA/QLoRA).
+
+### Installation
+
+The required dependencies are included in the main `pyproject.toml`. If installing manually:
+
+```bash
+uv sync
+```
+
+### Quick Start
+
+**Fine-tune Qwen3.5-0.8B on your data:**
+
+```bash
+python src/train_qwen_finetune.py \
+    --data_path data/instructions.json \
+    --model_name unsloth/Qwen3.5-0.8B-Q8_0 \
+    --lora_rank 8 \
+    --learning_rate 2e-4 \
+    --epochs 3
+```
+
+### Data Formats
+
+The fine-tuning script supports multiple data formats:
+
+**1. Instruction Format (JSON/JSONL):**
+```json
+[
+  {
+    "instruction": "Translate to French",
+    "input": "Hello, how are you?",
+    "output": "Bonjour, comment allez-vous?"
+  },
+  {
+    "instruction": "Summarize the text",
+    "input": "Long text here...",
+    "output": "Brief summary..."
+  }
+]
+```
+
+**2. Chat Format:**
+```json
+[
+  {
+    "messages": [
+      {"role": "user", "content": "What is AI?"},
+      {"role": "assistant", "content": "Artificial Intelligence is..."}
+    ]
+  }
+]
+```
+
+**3. Simple Text (TXT/JSONL):**
+```
+One text sample per line
+```
+
+### Training Options
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--model_name` | `unsloth/Qwen3.5-0.8B-Q8_0` | HuggingFace model to fine-tune |
+| `--data_path` | (required) | Path to training data |
+| `--format_type` | `instruction` | Data format: `instruction`, `chat`, `text` |
+| `--lora_rank` | `8` | LoRA rank (higher = more parameters) |
+| `--lora_alpha` | `16` | LoRA alpha scaling |
+| `--learning_rate` | `2e-4` | Learning rate |
+| `--epochs` | `3` | Number of training epochs |
+| `--batch_size` | `4` | Batch size |
+| `--gradient_accumulation_steps` | `4` | Gradient accumulation |
+| `--max_length` | `512` | Maximum sequence length |
+| `--use_quantization` | `True` | Use 4-bit quantization (QLoRA) |
+| `--use_lora` | `True` | Use LoRA adapters |
+
+### Memory Requirements
+
+| Method | GPU Memory (approx.) |
+|--------|---------------------|
+| QLoRA (4-bit) | ~6 GB |
+| LoRA (8-bit) | ~10 GB |
+| Full fine-tuning | ~20+ GB |
+
+### Inference
+
+**Single prompt:**
+```bash
+python src/run_qwen_finetuned_inference.py \
+    --model_dir outputs/finetuned_model \
+    --prompt "What is machine learning?" \
+    --max_new_tokens 256
+```
+
+**Interactive mode:**
+```bash
+python src/run_qwen_finetuned_inference.py \
+    --model_dir outputs/finetuned_model \
+    --interactive
+```
+
+**Batch inference:**
+```bash
+python src/run_qwen_finetuned_inference.py \
+    --model_dir outputs/finetuned_model \
+    --input_file prompts.txt \
+    --output_file generations.json
+```
+
+### Example: Fine-tuning for Question Answering
+
+1. **Prepare your data** (`data/qa_dataset.json`):
+```json
+[
+  {
+    "instruction": "Answer the question based on the context.",
+    "input": "Context: Paris is the capital of France. Question: What is the capital of France?",
+    "output": "The capital of France is Paris."
+  }
+]
+```
+
+2. **Train the model:**
+```bash
+python src/train_qwen_finetune.py \
+    --data_path data/qa_dataset.json \
+    --format_type instruction \
+    --lora_rank 16 \
+    --learning_rate 1e-4 \
+    --epochs 5 \
+    --batch_size 4 \
+    --run_name qa_finetuned
+```
+
+3. **Run inference:**
+```bash
+python src/run_qwen_finetuned_inference.py \
+    --model_dir outputs/finetuned_qa_finetuned \
+    --prompt "Context: London is the capital of UK. Question: What is the capital of UK?" \
+    --interactive
+```
+
+### Output Structure
+
+After training, the output directory contains:
+```
+outputs/finetuned_model_YYYYMMDD_HHMMSS/
+├── adapter_model/       # LoRA adapter weights
+├── tokenizer/           # Tokenizer files
+├── checkpoints/         # Training checkpoints
+├── finetune_config.json # Training configuration
+└── lightning_logs/      # Training logs
+```
+
+### Limitations
+
+- QLoRA uses quantized models which may have slightly reduced quality compared to full fine-tuning
+- The 0.8B parameter model has limited capacity for complex tasks
+- For best results, use high-quality, task-specific training data
