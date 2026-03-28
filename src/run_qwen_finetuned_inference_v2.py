@@ -122,17 +122,10 @@ def main():
             )
 
         # Decode and clean response
-        # Decode and clean response
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
-        print("\n--- Raw Decoded Output ---")
-        print(decoded_output)
-        print("--------------------------\n")
-
         try:
-            assistant_response = decoded_output.split("<|im_start|>assistant\n")[
-                1
-            ].strip()
+            assistant_response = decoded_output.split("assistant\n")[1].strip()
         except IndexError:
             assistant_response = (
                 "ERROR: Model did not generate a response in the expected format."
