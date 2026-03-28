@@ -7,10 +7,10 @@ by concatenating 'S_text' and 'L_text' columns, runs inference, and saves
 the results to a new Excel file.
 
 Usage:
-    python src/run_qwen_finetuned_inference_v2.py 
-        --model_path "outputs" 
-        --input_file "data/data_district_heating.xlsx" 
-        --sheet_name "Sheet1" 
+    python src/run_qwen_finetuned_inference_v2.py
+        --model_path "outputs"
+        --input_file "data/data_district_heating.xlsx"
+        --sheet_name "Sheet1"
         --output_file "outputs/inference_results.xlsx"
 """
 
@@ -20,6 +20,7 @@ import torch
 from tqdm import tqdm
 from unsloth import FastLanguageModel
 
+
 def main():
     """
     Main function to run the batch inference script.
@@ -28,14 +29,41 @@ def main():
         description="Run batch inference with a Qwen v2 model using an Excel file."
     )
     # Model and data arguments
-    parser.add_argument("--model_path", type=str, required=True, help="Path to the fine-tuned adapter model directory.")
-    parser.add_argument("--input_file", type=str, required=True, help="Path to the input .xlsx file.")
-    parser.add_argument("--sheet_name", type=str, required=True, help="Name of the sheet to read from the Excel file.")
-    parser.add_argument("--output_file", type=str, required=True, help="Path to save the output .xlsx file with results.")
+    parser.add_argument(
+        "--model_path",
+        type=str,
+        required=True,
+        help="Path to the fine-tuned adapter model directory.",
+    )
+    parser.add_argument(
+        "--input_file", type=str, required=True, help="Path to the input .xlsx file."
+    )
+    parser.add_argument(
+        "--sheet_name",
+        type=str,
+        required=True,
+        help="Name of the sheet to read from the Excel file.",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        required=True,
+        help="Path to save the output .xlsx file with results.",
+    )
 
     # Generation arguments
-    parser.add_argument("--max_seq_length", type=int, default=2048, help="Maximum sequence length for the model.")
-    parser.add_argument("--max_new_tokens", type=int, default=256, help="Maximum number of new tokens to generate per prompt.")
+    parser.add_argument(
+        "--max_seq_length",
+        type=int,
+        default=2048,
+        help="Maximum sequence length for the model.",
+    )
+    parser.add_argument(
+        "--max_new_tokens",
+        type=int,
+        default=256,
+        help="Maximum number of new tokens to generate per prompt.",
+    )
     args = parser.parse_args()
 
     # --- 1. Load Model ---
@@ -60,37 +88,39 @@ def main():
         return
 
     # Validate columns
-    if 'S_text' not in df.columns or 'L_text' not in df.columns:
+    if "S_text" not in df.columns or "L_text" not in df.columns:
         print("Error: The Excel sheet must contain 'S_text' and 'L_text' columns.")
         return
-    
+
     # Fill any NaN values in the text columns to prevent errors
-    df['S_text'] = df['S_text'].fillna('')
-    df['L_text'] = df['L_text'].fillna('')
+    df["S_text"] = df["S_text"].fillna("")
+    df["L_text"] = df["L_text"].fillna("")
 
     # --- 3. Run Batch Inference ---
     results = []
-    prompt_template = "<|im_start|>user
+    prompt_template = """<|im_start|>user
 {}<|im_end|>
 <|im_start|>assistant
-"
+"""
 
     print(f"Running inference on {len(df)} rows...")
     for index, row in tqdm(df.iterrows(), total=df.shape[0], desc="Inference"):
         # Concatenate columns to form the prompt
-        prompt_text = str(row['S_text']) + " " + str(row['L_text'])
+        prompt_text = str(row["S_text"]) + " " + str(row["L_text"])
         full_prompt = prompt_template.format(prompt_text)
 
         # Tokenize and generate
-        inputs = tokenizer(text=[full_prompt], images=None, return_tensors="pt").to("cuda")
+        inputs = tokenizer(text=[full_prompt], images=None, return_tensors="pt").to(
+            "cuda"
+        )
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.eos_token_id,
             )
-        
+
         # Decode and clean response
         # Decode and clean response
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
@@ -100,16 +130,19 @@ def main():
         print("--------------------------\n")
 
         try:
-            assistant_response = decoded_output.split("<|im_start|>assistant\n")[1].strip()
+            assistant_response = decoded_output.split("<|im_start|>assistant\n")[
+                1
+            ].strip()
         except IndexError:
-            assistant_response = "ERROR: Model did not generate a response in the expected format."
-        
+            assistant_response = (
+                "ERROR: Model did not generate a response in the expected format."
+            )
+
         results.append(assistant_response)
 
     # --- 4. Save Results ---
-    df['generated_response'] = results
-    print(f"
-Saving results to '{args.output_file}'...")
+    df["generated_response"] = results
+    print(f"Saving results to '{args.output_file}'...")
     try:
         # Create output directory if it doesn't exist
         pd.DataFrame(df).to_excel(args.output_file, index=False)
