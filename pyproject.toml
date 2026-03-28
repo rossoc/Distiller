@@ -33,7 +33,9 @@ dependencies = [
     "torch>=2.10.0",
     "transformers>=4.48.0",
     "tqdm>=4.67.3",
+    "trl>=0.9.4",
     "wandb>=0.25.1",
+    "unsloth>=2026.3.17",
 ]
 
 [tool.hatch.build.targets.wheel]
