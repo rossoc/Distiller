@@ -19,6 +19,8 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 from unsloth import FastLanguageModel
+import json
+from datetime import datetime
 
 
 def main():
@@ -48,7 +50,14 @@ def main():
         "--output_file",
         type=str,
         required=True,
-        help="Path to save the output .xlsx file with results.",
+        help="Path to save the output file with results.",
+    )
+    parser.add_argument(
+        "--output_format",
+        type=str,
+        default="xlsx",
+        choices=["xlsx", "json"],
+        help="Format to save the output results (xlsx or json).",
     )
 
     # Generation arguments
@@ -97,7 +106,7 @@ def main():
     df["L_text"] = df["L_text"].fillna("")
 
     # --- 3. Run Batch Inference ---
-    results = []
+    inference_results = []
     prompt_template = """<|im_start|>user
 {}<|im_end|>
 <|im_start|>assistant
@@ -124,24 +133,45 @@ def main():
         # Decode and clean response
         decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
 
+        assistant_response = ""
         try:
             assistant_response = decoded_output.split("assistant\n")[1].strip()
         except IndexError:
             assistant_response = (
                 "ERROR: Model did not generate a response in the expected format."
             )
-
-        results.append(assistant_response)
+        
+        # Store results for both JSON and XLSX output
+        inference_results.append({
+            "original_prompt": prompt_text,
+            "generated_response": assistant_response
+        })
 
     # --- 4. Save Results ---
-    df["generated_response"] = results
-    print(f"Saving results to '{args.output_file}'...")
-    try:
-        # Create output directory if it doesn't exist
-        pd.DataFrame(df).to_excel(args.output_file, index=False)
-        print("Inference complete. Results saved successfully.")
-    except Exception as e:
-        print(f"Error saving results to Excel file: {e}")
+    print(f"\nSaving results to '{args.output_file}'...")
+    if args.output_format == "json":
+        json_output = {
+            "timestamp": datetime.now().isoformat(),
+            "model_path": args.model_path,
+            "n_samples": len(df),
+            "results": [
+                {
+                    "input": res["original_prompt"],
+                    "predictions": [{"text": res["generated_response"]}]
+                } for res in inference_results
+            ]
+        }
+        with open(args.output_file, "w", encoding="utf-8") as f:
+            json.dump(json_output, f, indent=2, ensure_ascii=False)
+        print("Inference complete. Results saved successfully in JSON format.")
+    else: # Default to xlsx
+        # Add generated responses back to the original DataFrame for XLSX output
+        df["generated_response"] = [res["generated_response"] for res in inference_results]
+        try:
+            pd.DataFrame(df).to_excel(args.output_file, index=False)
+            print("Inference complete. Results saved successfully in XLSX format.")
+        except Exception as e:
+            print(f"Error saving results to Excel file: {e}")
 
 
 if __name__ == "__main__":
