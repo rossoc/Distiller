@@ -82,7 +82,7 @@ def main():
         full_prompt = prompt_template.format(prompt_text)
 
         # Tokenize and generate
-        inputs = tokenizer([full_prompt], return_tensors="pt").to("cuda")
+        inputs = tokenizer(text=[full_prompt], images=None, return_tensors="pt").to("cuda")
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
