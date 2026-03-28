@@ -101,21 +101,21 @@ def parse_args():
         "--num_heads_choices",
         type=int,
         nargs="+",
-        default=[4, 8, 16, 32],
+        default=[4, 8, 16, 32, 64],
         help="Choices for num_heads (default: 4 8 16 32)",
     )
     parser.add_argument(
         "--num_layers_choices",
         type=int,
         nargs="+",
-        default=[2, 4, 6, 8],
+        default=[1, 2],
         help="Choices for num_layers (default: 2 4 6 8)",
     )
     parser.add_argument(
         "--fwd_dim_choices",
         type=int,
         nargs="+",
-        default=[1024, 2048, 3072, 4096],
+        default=[512, 1024],
         help="Choices for fwd_dim (default: 1024 2048 3072 4096)",
     )
     parser.add_argument(
@@ -711,10 +711,10 @@ def main():
     # Pre-compute embeddings ONCE before the study starts
     # This avoids loading the encoder and re-computing embeddings for each trial
     print("Pre-computing embeddings (this may take a while)...")
-    
+
     # Get embedding dimension from encoder choice
     output_dim = get_encoder_dim(args.encoder)
-    
+
     # Load encoder for pre-computing embeddings
     encoder_model = encoder(args.encoder)
 
@@ -736,11 +736,12 @@ def main():
 
     # Delete encoder to free memory (no longer needed)
     del encoder_model
-    
+
     # Force garbage collection after pre-computing
     import gc
+
     gc.collect()
-    
+
     print("Embeddings pre-computed successfully!")
     print(f"  Train samples: {len(train_dataset)}")
     print(f"  Eval samples: {len(eval_dataset)}")

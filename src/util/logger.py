@@ -52,7 +52,6 @@ def log_training_config(run_path: Path, args: argparse.Namespace, data_info: dic
         "timestamp": datetime.now().isoformat(),
         "model": {
             "output_dim": 768,
-            "emb_dim": args.emb_dim,
             "num_layers": args.num_layers,
             "fwd_dim": args.fwd_dim,
             "num_heads": args.num_heads,
