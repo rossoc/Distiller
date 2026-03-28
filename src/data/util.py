@@ -86,6 +86,7 @@ def split_dataset(X, y, train_ratio, eval_ratio):
 
 
 def load_dataset(
+    filename: str,
     split_ratio: Tuple[float, float, float],
     schema: str = "simple_diffusion",
 ):
@@ -101,7 +102,7 @@ def load_dataset(
     # dataset_variation = Datasets_Variations.SIMPLE_DIFFUSION
     if schema not in datasets:
         raise ValueError(f"""Wrong value for dataset_name, expected one of
-                         {", ".join([str(i) for i in Datasets_Variations])}, found:
+                         {", ".join([str(i) for i in datasets.keys()])}, found:
                          {schema}""")
 
     filename = getenv("dataset", "")

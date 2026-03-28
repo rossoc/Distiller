@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--wandb_project", type=str, default="qwen3.5-finetune", help="W&B project name")
     parser.add_argument("--seed", type=int, default=3407, help="Random seed")
+    parser.add_argument("--schema", type=str, default="simple_diffusion", help="Schema for loading data from XLSX files (e.g., simple_diffusion, simple_ner)")
     return parser.parse_args()
 
 def main():
@@ -28,7 +29,7 @@ def main():
     os.environ["WANDB_PROJECT"] = args.wandb_project
 
     # Load dataset
-    dataset_dict = load_qwen_dataset_v2(args.data_path, validation_split=0)
+    dataset_dict = load_qwen_dataset_v2(args.data_path, validation_split=0, schema=args.schema)
     train_dataset = dataset_dict["train"]
     
     training_args = {
