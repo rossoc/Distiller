@@ -73,6 +73,12 @@ def main():
         default=256,
         help="Maximum number of new tokens to generate per prompt.",
     )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=8,
+        help="Batch size for inference.",
+    )
     args = parser.parse_args()
 
     # --- 1. Load Model ---
@@ -84,6 +90,12 @@ def main():
         dtype=None,
     )
     model.eval()
+    FastLanguageModel.for_inference(model)
+
+    # Set up tokenizer for batched generation
+    tokenizer.padding_side = "left"
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # --- 2. Load Data ---
     print(f"Loading data from '{args.input_file}' sheet '{args.sheet_name}'...")
@@ -107,45 +119,50 @@ def main():
 
     # --- 3. Run Batch Inference ---
     inference_results = []
-    prompt_template = """<|im_start|>user
-{}<|im_end|>
-<|im_start|>assistant
-"""
+    prompt_template = """<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"""
 
-    print(f"Running inference on {len(df)} rows...")
-    for index, row in tqdm(df.iterrows(), total=df.shape[0], desc="Inference"):
-        # Concatenate columns to form the prompt
-        prompt_text = str(row["S_text"]) + " " + str(row["L_text"])
-        full_prompt = prompt_template.format(prompt_text)
+    print(f"Running inference on {len(df)} rows with batch size {args.batch_size}...")
+    
+    # Process in batches
+    for i in tqdm(range(0, len(df), args.batch_size), desc="Inference"):
+        batch_df = df.iloc[i:i + args.batch_size]
+        
+        batch_prompts = []
+        batch_original_texts = []
+        
+        for _, row in batch_df.iterrows():
+            prompt_text = str(row["S_text"]) + " " + str(row["L_text"])
+            batch_original_texts.append(prompt_text)
+            batch_prompts.append(prompt_template.format(prompt_text))
 
-        # Tokenize and generate
-        inputs = tokenizer(text=[full_prompt], images=None, return_tensors="pt").to(
-            "cuda"
-        )
+        # Tokenize batch
+        inputs = tokenizer(
+            batch_prompts, 
+            padding=True, 
+            return_tensors="pt"
+        ).to("cuda")
+        
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=args.max_new_tokens,
                 use_cache=True,
-                pad_token_id=tokenizer.eos_token_id,
             )
 
-        # Decode and clean response
-        decoded_output = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        # Decode batch
+        # We need to slice the output to only get the newly generated tokens
+        input_lengths = inputs["input_ids"].shape[1]
+        generated_tokens = outputs[:, input_lengths:]
+        decoded_outputs = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
 
-        assistant_response = ""
-        try:
-            assistant_response = decoded_output.split("assistant\n")[1].strip()
-        except IndexError:
-            assistant_response = (
-                "ERROR: Model did not generate a response in the expected format."
-            )
-        
-        # Store results for both JSON and XLSX output
-        inference_results.append({
-            "original_prompt": prompt_text,
-            "generated_response": assistant_response
-        })
+        for original_text, decoded_output in zip(batch_original_texts, decoded_outputs):
+            assistant_response = decoded_output.strip()
+            
+            # Store results for both JSON and XLSX output
+            inference_results.append({
+                "original_prompt": original_text,
+                "generated_response": assistant_response
+            })
 
     # --- 4. Save Results ---
     print(f"\nSaving results to '{args.output_file}'...")

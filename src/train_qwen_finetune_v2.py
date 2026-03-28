@@ -14,8 +14,9 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="unsloth/Qwen3.5-0.8B", help="Model name")
     parser.add_argument("--max_seq_length", type=int, default=2048, help="Max sequence length")
     parser.add_argument("--max_steps", type=int, default=100, help="Max training steps")
-    parser.add_argument("--batch_size", type=int, default=2, help="Per device train batch size")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4, help="Gradient accumulation steps")
+    parser.add_argument("--batch_size", type=int, default=8, help="Per device train batch size")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2, help="Gradient accumulation steps")
+    parser.add_argument("--dataset_num_proc", type=int, default=8, help="Number of workers for data processing")
     parser.add_argument("--learning_rate", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--output_dir", type=str, default="outputs", help="Output directory")
     parser.add_argument("--wandb_project", type=str, default="qwen3.5-finetune", help="W&B project name")
@@ -53,6 +54,7 @@ def main():
     finetuner = QwenFinetunerV2(
         model_name=args.model_name,
         max_seq_length=args.max_seq_length,
+        dataset_num_proc=args.dataset_num_proc,
         **training_args
     )
     

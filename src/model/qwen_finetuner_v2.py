@@ -7,9 +7,10 @@ from trl import SFTTrainer
 from transformers import TrainingArguments
 
 class QwenFinetunerV2:
-    def __init__(self, model_name, max_seq_length, load_in_4bit=True, **training_args):
+    def __init__(self, model_name, max_seq_length, dataset_num_proc=2, load_in_4bit=True, **training_args):
         self.model_name = model_name
         self.max_seq_length = max_seq_length
+        self.dataset_num_proc = dataset_num_proc
         self.load_in_4bit = load_in_4bit
         self.training_args = training_args
         self.model, self.tokenizer = self._init_model()
@@ -43,7 +44,7 @@ class QwenFinetunerV2:
             train_dataset=train_dataset,
             dataset_text_field="text",
             max_seq_length=self.max_seq_length,
-            dataset_num_proc=2,
+            dataset_num_proc=self.dataset_num_proc,
             args=TrainingArguments(**self.training_args),
         )
         trainer_stats = trainer.train()
