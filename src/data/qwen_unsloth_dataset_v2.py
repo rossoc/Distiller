@@ -8,17 +8,19 @@ from typing import List, Dict, Any, Union
 from datasets import Dataset, DatasetDict, load_dataset
 from src.data.util import load_dataset as util_load_dataset
 
+
 def formatting_prompts_func(examples):
     """
     Data formatting function for ChatML.
     """
     instructions = examples["source"]
-    outputs      = examples["target"]
+    outputs = examples["target"]
     texts = []
     for instruction, output in zip(instructions, outputs):
         text = f"<|im_start|>user\n{instruction}<|im_end|>\n<|im_start|>assistant\n{output}<|im_end|>"
         texts.append(text)
-    return { "text" : texts }
+    return {"text": texts}
+
 
 def load_qwen_dataset_v2(
     data_path: Union[str, Path],
@@ -33,7 +35,9 @@ def load_qwen_dataset_v2(
 
     if data_path.suffix == ".xlsx":
         # Load from XLSX using util.load_dataset
-        (X_all, y_all), _, _ = util_load_dataset(str(data_path), split_ratio=(1.0, 0.0, 0.0), schema=schema)
+        (X_all, y_all), _, _ = util_load_dataset(
+            str(data_path), split_ratio=(1.0, 0.0, 0.0), schema=schema
+        )
 
         # Convert to list of dicts for Hugging Face Dataset
         data = [{"source": X, "target": Y} for X, Y in zip(X_all, y_all)]
@@ -50,12 +54,6 @@ def load_qwen_dataset_v2(
         dataset_dict = dataset.train_test_split(
             test_size=validation_split,
             seed=seed,
-            shuffle=True,
-        )
-        return dataset_dict
-    else:
-        return DatasetDict({"train": dataset, "test": None})
-
             shuffle=True,
         )
         return dataset_dict
