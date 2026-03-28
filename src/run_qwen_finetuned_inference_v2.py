@@ -137,7 +137,7 @@ def main():
 
         # Tokenize batch
         inputs = tokenizer(
-            batch_prompts, 
+            text=batch_prompts, 
             padding=True, 
             return_tensors="pt"
         ).to("cuda")
