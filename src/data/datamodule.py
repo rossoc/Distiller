@@ -107,7 +107,7 @@ class EmbeddingDecoderDataModule(L.LightningDataModule):
         else:
             # Load raw text data and create datasets on-the-fly
             self.train_data, self.eval_data, self.test_data = load_dataset(
-                (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
+                "", (self.train_ratio, self.eval_ratio, self.test_ratio), "simple_diffusion"
             )
 
     def _build_dataloader(self, X, y, shuffle=True) -> DataLoader:
