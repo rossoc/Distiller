@@ -1,254 +1,134 @@
-<h1 style="text-align:center;"> Distiller </h1>
+# Distiller
 
-## Embedding Decoder: Text-to-Embeddings-to-Text
+A latent-space sequence-to-sequence model for **normalized span extraction**
+from low-resource text.
 
-This project includes an **Embedding Decoder** module that enables generating text from embeddings. The architecture uses EmbeddingGemma as an encoder and a Gemma decoder with a trainable projection layer.
+## Problem
 
-### Architecture
+Standard Named Entity Recognition assumes the entity appears verbatim in the
+source text. Many real-world tasks instead require the entity to be
+**normalized**:
+
+- a plural surface form must be returned in its singular canonical form,
+- a quantity written in words ("twenty-three") must be returned as digits,
+- abbreviations and morphological variants must be collapsed onto a single
+  reference label.
+
+Because the source and target strings differ in surface form while sharing
+semantics, purely extractive tagging is insufficient. Distiller treats the
+problem as **sequence-to-sequence in embedding space**, then projects back to
+text via nearest-neighbour retrieval over a closed label vocabulary.
+
+## Approach 1 — Latent-Space Decoder (primary)
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌─────────────────┐     ┌──────────┐     ┌──────────┐
-│   Input     │────▶│ EmbeddingGemma   │────▶│  Projection     │────▶│  Gemma   │────▶│  Output  │
-│    Text     │     │    (Encoder)     │     │     Layer       │     │ Decoder  │     │   Text   │
-│             │     │                  │     │                 │     │          │     │          │
-│             │     │ 768-dim embedding│     │768→2304 projection│   │          │     │          │
-└─────────────┘     └──────────────────┘     └─────────────────┘     └──────────┘     └──────────┘
+                   ┌──────────────────┐   ┌───────────────┐   ┌──────────────┐
+  source text ───▶ │ frozen embedding │──▶│  Transformer  │──▶│  predicted   │
+                   │     encoder      │   │    decoder    │   │  embeddings  │
+                   └──────────────────┘   └───────────────┘   └──────┬───────┘
+                                                                     │
+                                                              ┌──────▼───────┐
+                                target text  ◀─── FAISS NN ───│ mean-pooled  │
+                                                              └──────────────┘
 ```
 
-### Installation
+A frozen encoder (EmbeddingGemma 300M or Qwen3.5 0.8B, both quantized and run
+on CPU via `llama-cpp`) produces token-level embeddings of the source. A
+Transformer decoder is trained from scratch to map these onto the embeddings
+of the canonical target. At inference time, the predicted vector is matched
+against a FAISS index of all candidate labels.
 
-```bash
-uv sync
-```
+### Components
+
+| File | Role |
+|------|------|
+| `src/model/encoder.py` | Selects between Gemma / Qwen GGUF encoders; token-level pooling (`LLAMA_POOLING_TYPE_NONE`). |
+| `src/model/decoder.py` | `nn.TransformerDecoder` (configurable depth / heads / FFN), Xavier init. |
+| `src/model/diffusion_trainer.py` | Lightning module. Combined **MSE + cosine** loss (`DiffusionLoss`), OneCycleLR warmup, two-step iterative refinement inside `training_step`. |
+| `src/model/faiss_retriever.py` | `IndexFlatIP` over L2-normalised, mean-pooled target embeddings (inner product ≡ cosine). |
+| `src/data/datamodule.py`, `src/data/dataset.py` | Pre-computes encoder embeddings once, pads variable-length sequences via `embedding_collate_fn`. |
+| `src/data/split_dataset.py` | Reproducible train / eval / test splits. |
+| `src/optuna_search.py` | Optuna HPO (TPE sampler, Median pruner, Lightning integration). |
 
 ### Training
 
-Train the projection layer to map EmbeddingGemma embeddings to Gemma decoder input space:
-
 ```bash
-python src/train_decoder.py \
-    --data_path data/training_texts.txt \
-    --output_dir outputs/decoder_checkpoint \
-    --encoder_model "google/embeddinggemma-300m" \
-    --decoder_model "google/gemma-2-2b" \
-    --epochs 10 \
-    --batch_size 16 \
-    --learning_rate 1e-4
+python src/train_latent_space.py \
+    --encoder gemma \
+    --num_layers 6 \
+    --fwd_dim 2048 \
+    --num_heads 8 \
+    --epochs 50 \
+    --batch_size 32 \
+    --learning_rate 1e-4 \
+    --loss_alpha 0.5
 ```
 
-**Data format**: One text per line in your training file.
+Each run writes weights, config, and W&B logs to a timestamped folder under
+`outputs/`.
 
 ### Inference
 
-Generate text from embeddings:
+The FAISS index is built once over the target vocabulary, then reused:
 
 ```bash
-python scripts/embed_to_text.py \
-    --checkpoint outputs/decoder_checkpoint/best_model.pt \
-    --prompt "The future of artificial intelligence" \
-    --max-new-tokens 100 \
-    --temperature 0.8 \
-    --num-samples 3
+# 1. build the FAISS index from the test-set targets
+python src/test_latent_space.py \
+    --model_path outputs/<run>/best_model.pt \
+    --build_index
+
+# 2. run retrieval-based inference
+python src/test_latent_space.py \
+    --model_path outputs/<run>/best_model.pt \
+    --k 3
 ```
 
-### Key Components
+## Approach 2 — LoRA Fine-Tuning (secondary experiment)
 
-| File | Description |
-|------|-------------|
-| `src/model/embedding_decoder.py` | Core model architecture with `EmbeddingDecoderModel` and `EmbeddingEncoderWrapper` |
-| `src/train_decoder.py` | Training pipeline with dataset, collator, and training loop |
-| `scripts/embed_to_text.py` | Inference script for generating text from embeddings |
+A direct text-to-text baseline was implemented for comparison: 4-bit QLoRA
+fine-tuning of Qwen3.5-0.8B with Unsloth and TRL's `SFTTrainer`
+(`src/model/qwen_finetuner_v2.py`, entrypoints `src/train_lora.py` and
+`src/test_lora.py`).
 
-### How It Works
+This approach **underperformed** the latent-space decoder on the target
+dataset. The most likely cause is that a sub-billion-parameter base model
+carries weak coverage of the low-resource language used in the corpus: its
+token embeddings do not encode enough lexical or morphological signal for the
+LoRA adapters to learn the normalization mapping reliably with the available
+data. The code is kept in-repo as a documented baseline.
 
-1. **Encoding**: Input text is encoded to a 768-dimensional embedding using EmbeddingGemma
-2. **Projection**: The embedding is projected to the decoder's hidden space (2304-dim for Gemma-2-2B) via a trainable MLP
-3. **Decoding**: The Gemma decoder autoregressively generates tokens from the projected embedding
+## Repository layout
 
-### Training Details
+```
+src/
+├── train_latent_space.py     # primary training entrypoint
+├── test_latent_space.py      # FAISS-based inference
+├── train_lora.py             # LoRA baseline training
+├── test_lora.py              # LoRA baseline inference
+├── optuna_search.py          # hyper-parameter search
+├── model/                    # decoder, encoder, trainer, retriever, LoRA wrapper
+├── data/                     # data module, dataset, split, schema utilities
+└── util/                     # logging, seeding, callbacks, result analysis
 
-- **Objective**: Causal language modeling - predict text continuation given prefix embeddings
-- **Frozen components**: EmbeddingGemma encoder and Gemma decoder weights are frozen
-- **Trainable components**: Only the projection layer is trained
-- **Pooling**: Uses sentence-level embeddings (mean-pooled) from the encoder
+notebooks/
+├── data-exploration.ipynb    # dataset statistics and sanity checks
+├── finetuning-qwen.ipynb     # LoRA experiment walkthrough
+└── model-usage.ipynb         # loading a checkpoint and running retrieval
+```
 
-### Limitations
-
-- The decoder generates text conditioned on the **semantic meaning** of the input embedding, not a word-for-word reconstruction
-- Quality depends on training data diversity and size
-- Currently uses sentence-level embeddings; token-level embeddings would enable more precise conditioning
-
-### Model Variants
-
-| Decoder | Hidden Size | Parameters | Use Case |
-|---------|-------------|------------|----------|
-| Gemma-2-2B | 2304 | ~2.6B | Balanced quality/speed |
-| Gemma-2-9B | 3584 | ~9.4B | Higher quality generation |
-| Llama-3-8B | 4096 | ~8B | Alternative architecture |
-
-To use a different decoder, change the `--decoder_model` argument during training.
-
----
-
-## LLM Fine-tuning (LoRA/QLoRA)
-
-This project also supports fine-tuning large language models like **Qwen3.5-0.8B** using parameter-efficient methods (LoRA/QLoRA).
-
-### Installation
-
-The required dependencies are included in the main `pyproject.toml`. If installing manually:
+## Setup
 
 ```bash
 uv sync
 ```
 
-### Quick Start
+The encoders are loaded from local GGUF files referenced in
+`src/model/encoder.py`:
 
-**Fine-tune Qwen3.5-0.8B on your data:**
-
-```bash
-python src/train_qwen_finetune.py \
-    --data_path data/instructions.json \
-    --model_name unsloth/Qwen3.5-0.8B-Q8_0 \
-    --lora_rank 8 \
-    --learning_rate 2e-4 \
-    --epochs 3
+```
+models/embeddinggemma-300M-Q8.gguf
+models/Qwen3.5-0.8B-Q8_0.gguf
 ```
 
-### Data Formats
-
-The fine-tuning script supports multiple data formats:
-
-**1. Instruction Format (JSON/JSONL):**
-```json
-[
-  {
-    "instruction": "Translate to French",
-    "input": "Hello, how are you?",
-    "output": "Bonjour, comment allez-vous?"
-  },
-  {
-    "instruction": "Summarize the text",
-    "input": "Long text here...",
-    "output": "Brief summary..."
-  }
-]
-```
-
-**2. Chat Format:**
-```json
-[
-  {
-    "messages": [
-      {"role": "user", "content": "What is AI?"},
-      {"role": "assistant", "content": "Artificial Intelligence is..."}
-    ]
-  }
-]
-```
-
-**3. Simple Text (TXT/JSONL):**
-```
-One text sample per line
-```
-
-### Training Options
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `--model_name` | `unsloth/Qwen3.5-0.8B-Q8_0` | HuggingFace model to fine-tune |
-| `--data_path` | (required) | Path to training data |
-| `--format_type` | `instruction` | Data format: `instruction`, `chat`, `text` |
-| `--lora_rank` | `8` | LoRA rank (higher = more parameters) |
-| `--lora_alpha` | `16` | LoRA alpha scaling |
-| `--learning_rate` | `2e-4` | Learning rate |
-| `--epochs` | `3` | Number of training epochs |
-| `--batch_size` | `4` | Batch size |
-| `--gradient_accumulation_steps` | `4` | Gradient accumulation |
-| `--max_length` | `512` | Maximum sequence length |
-| `--use_quantization` | `True` | Use 4-bit quantization (QLoRA) |
-| `--use_lora` | `True` | Use LoRA adapters |
-
-### Memory Requirements
-
-| Method | GPU Memory (approx.) |
-|--------|---------------------|
-| QLoRA (4-bit) | ~6 GB |
-| LoRA (8-bit) | ~10 GB |
-| Full fine-tuning | ~20+ GB |
-
-### Inference
-
-**Single prompt:**
-```bash
-python src/run_qwen_finetuned_inference.py \
-    --model_dir outputs/finetuned_model \
-    --prompt "What is machine learning?" \
-    --max_new_tokens 256
-```
-
-**Interactive mode:**
-```bash
-python src/run_qwen_finetuned_inference.py \
-    --model_dir outputs/finetuned_model \
-    --interactive
-```
-
-**Batch inference:**
-```bash
-python src/run_qwen_finetuned_inference.py \
-    --model_dir outputs/finetuned_model \
-    --input_file prompts.txt \
-    --output_file generations.json
-```
-
-### Example: Fine-tuning for Question Answering
-
-1. **Prepare your data** (`data/qa_dataset.json`):
-```json
-[
-  {
-    "instruction": "Answer the question based on the context.",
-    "input": "Context: Paris is the capital of France. Question: What is the capital of France?",
-    "output": "The capital of France is Paris."
-  }
-]
-```
-
-2. **Train the model:**
-```bash
-python src/train_qwen_finetune.py \
-    --data_path data/qa_dataset.json \
-    --format_type instruction \
-    --lora_rank 16 \
-    --learning_rate 1e-4 \
-    --epochs 5 \
-    --batch_size 4 \
-    --run_name qa_finetuned
-```
-
-3. **Run inference:**
-```bash
-python src/run_qwen_finetuned_inference.py \
-    --model_dir outputs/finetuned_qa_finetuned \
-    --prompt "Context: London is the capital of UK. Question: What is the capital of UK?" \
-    --interactive
-```
-
-### Output Structure
-
-After training, the output directory contains:
-```
-outputs/finetuned_model_YYYYMMDD_HHMMSS/
-├── adapter_model/       # LoRA adapter weights
-├── tokenizer/           # Tokenizer files
-├── checkpoints/         # Training checkpoints
-├── finetune_config.json # Training configuration
-└── lightning_logs/      # Training logs
-```
-
-### Limitations
-
-- QLoRA uses quantized models which may have slightly reduced quality compared to full fine-tuning
-- The 0.8B parameter model has limited capacity for complex tasks
-- For best results, use high-quality, task-specific training data
+Place the quantised weights at those paths before running training or
+inference.
