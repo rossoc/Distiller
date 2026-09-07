@@ -5,37 +5,23 @@ build-backend = "hatchling.build"
 [project]
 name = "distiller"
 version = "0.1.0"
-description = "Add your description here"
+description = "Autoregressive DFM-Mimir fine-tuning for normalized span extraction"
 readme = "README.md"
-requires-python = "==3.12.3"
+requires-python = ">=3.12"
 dependencies = [
-    "accelerate>=1.0.0",
-    "bitsandbytes>=0.45.0",
-    "datasets>=3.0.0",
-    "dotenv>=0.9.9",
-    "faiss-cpu>=1.9.0",
-    "gguf>=0.18.0",
-    "huggingface-hub>=1.7.2",
-    "ipython>=9.11.0",
-    "joblib>=1.5.3",
-    "kaleido>=1.2.0",
-    "lightning>=2.6.1",
-    "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git",
-    "matplotlib>=3.10.8",
-    "numpy>=2.0.0",
-    "openpyxl>=3.1.5",
-    "optuna>=4.8.0",
-    "optuna-integration[pytorch-lightning]>=4.8.0",
-    "pandas>=3.0.1",
-    "peft>=0.14.0",
-    "plotly>=6.6.0",
-    "sentence-transformers>=5.3.0",
-    "torch>=2.10.0",
-    "transformers>=4.48.0",
-    "tqdm>=4.67.3",
-    "trl>=0.9.4",
-    "wandb>=0.25.1",
-    "unsloth>=2024.8",
+    "torch>=2.13.0",
+    "transformers>=5.15.0",
+    "protobuf>=5.29.0",
+    "lightning>=2.6.5",
+    "optuna>=4.9.0",
+    "hydra-core==1.4.0.dev8",
+    "omegaconf==2.4.0.dev15",
+    "pyyaml>=6.0.0",
+    "polars>=1.43.2",
+    "fastexcel>=0.21.0",
+    "numpy>=2.5.1",
+    "accelerate>=1.14.0",
+    "wandb>=0.20.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -43,3 +29,11 @@ packages = ["src"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
