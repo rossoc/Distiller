@@ -10,17 +10,18 @@ checkpoint (provided via ``predict.checkpoint_dir``) and either:
 If no ``predict.checkpoint_dir`` is supplied the script exits with an error —
 there is no base-model fallback and no training path.
 
-Usage:
+Usage (this is a plain Hydra entrypoint, not argparse — every option,
+including ``mode``, is a ``key=value`` override):
     # Score a trained checkpoint on the held-out test set
-    python src/predict.py --mode evaluate \
+    python src/predict.py predict.mode=evaluate \
         predict.checkpoint_dir=outputs/final_model
 
     # Score a Lightning .ckpt instead
-    python src/predict.py --mode evaluate \
+    python src/predict.py predict.mode=evaluate \
         predict.checkpoint_dir=outputs/best.ckpt
 
     # Generate completions for custom prompts
-    python src/predict.py --mode generate \
+    python src/predict.py predict.mode=generate \
         predict.checkpoint_dir=outputs/final_model \
         predict.prompts='["Some input text fuel_type"]'
 """
@@ -34,11 +35,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import hydra
+import lightning as L
 import torch
 from omegaconf import DictConfig, OmegaConf
 
+from data.loader import _FIELD_MARKER_RE
 from lit_datamodule import DistillerDataModule
-from model.dfm_mimir import DFMMimirModule
+from model.factory import DEFAULT_KIND, filter_kwargs, module_class
 from utils import dataloader_runtime
 
 log = logging.getLogger(__name__)
@@ -51,8 +54,14 @@ log = logging.getLogger(__name__)
 def _load_module_from_checkpoint(
     cfg: DictConfig,
     checkpoint_dir: str,
-) -> DFMMimirModule:
-    """Load a trained DFMMimirModule from a checkpoint path.
+) -> L.LightningModule:
+    """Load a trained module from a checkpoint path.
+
+    Which class to load is decided by ``cfg.model.kind`` — the same selector
+    training used — and the rest of ``cfg.model`` is forwarded to whichever of
+    ``load_from_checkpoint``/``from_pretrained`` runs, keeping only the keys
+    that class actually names (the two kinds disagree on, for instance,
+    ``model_id`` vs ``donor_model_id``).
 
     Supports both a HuggingFace model directory (saved by
     ``module.save_pretrained``) and a Lightning ``.ckpt`` file. The two are
@@ -60,15 +69,15 @@ def _load_module_from_checkpoint(
     ``load_from_checkpoint``; anything else is treated as a model directory.
     """
     path = Path(checkpoint_dir)
+    model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    cls = module_class(model_cfg.pop("kind", DEFAULT_KIND))
 
     if path.is_file() and path.suffix == ".ckpt":
         log.info("Loading Lightning checkpoint from %s", path)
-        module = DFMMimirModule.load_from_checkpoint(
+        module = cls.load_from_checkpoint(
             str(path),
-            model_id=cfg.model.model_id,
-            trust_remote_code=cfg.model.trust_remote_code,
-            dtype=cfg.model.dtype,
             map_location="cpu",
+            **filter_kwargs(cls.__init__, model_cfg),
         )
         module.eval()
         if torch.cuda.is_available():
@@ -80,11 +89,12 @@ def _load_module_from_checkpoint(
         sys.exit(1)
 
     log.info("Loading trained model directory from %s", path)
-    return DFMMimirModule.from_pretrained(
-        model_id=cfg.model.model_id,
-        save_path=str(path),
-        trust_remote_code=cfg.model.trust_remote_code,
-        dtype=cfg.model.dtype,
+    # No .to() here: each class's from_pretrained owns its own device
+    # placement, because they load differently — DFMMimirModule hands the job
+    # to accelerate via device_map="auto" (and moving such a model afterwards
+    # raises), while MimirMamba2Module places itself.
+    return cls.from_pretrained(
+        **filter_kwargs(cls.from_pretrained, {**model_cfg, "save_path": str(path)})
     )
 
 
@@ -94,7 +104,7 @@ def _load_module_from_checkpoint(
 
 def evaluate_on_test(
     cfg: DictConfig,
-    module: DFMMimirModule,
+    module: L.LightningModule,
     output_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Score an already-trained checkpoint on the held-out test set.
@@ -118,16 +128,16 @@ def evaluate_on_test(
     test_samples = datamodule.get_test_samples()
     log.info("Test samples: %d", len(test_samples))
 
-    # Extract the target column name for each sample — it's the last whitespace-
-    # delimited token of the input prompt, which build_samples formats as
-    # f"{source_text} <{col}>?".  We parse out the column name from the <...>
-    # markers here so per-field/per-column accuracy uses the correct name
-    # regardless of tokenizer merging/decoding artifacts.
+    # Extract the target column name for each sample. build_samples formats
+    # the field marker as "<{col}>?", placed either at the tail of the input
+    # (default) or the head (data.prompt_first=true, for Mamba2 — see
+    # data.loader.build_samples_by_row), so locate it by regex rather than
+    # assuming a fixed end. This makes per-field/per-column accuracy correct
+    # regardless of ordering or tokenizer merging/decoding artifacts.
     sample_fields = []
     for s in test_samples:
-        token = s["input"].rsplit(" ", 1)[-1]
-        # "Pieces1" from "<Pieces1>?"
-        col_name = token.strip("<>?")
+        m = _FIELD_MARKER_RE.search(s["input"])
+        col_name = m.group(1) if m else s["input"].rsplit(" ", 1)[-1].strip("<>?")
         sample_fields.append(col_name)
 
     test_dl = datamodule.test_dataloader()
@@ -146,9 +156,6 @@ def evaluate_on_test(
             attention_mask = batch["attention_mask"].to(module.device)
             labels = batch["labels"]
 
-            outputs = module.model(input_ids, attention_mask=attention_mask, labels=labels)
-            logits = outputs.logits
-
             # Causal-LM convention: logits[:, t, :] predicts the token at
             # position t+1, not t (this is also how the model's own internal
             # loss aligns logits/labels). Comparing argmax(logits[:, t, :])
@@ -158,7 +165,12 @@ def evaluate_on_test(
             # "Ajva" as "vaAj" — every character present, just rotated by
             # however many characters that value's first token spans).
             # Shift right by one so predicted[:, t] lines up with labels[:, t].
-            pred_ids = torch.argmax(logits, dim=-1)
+            #
+            # argmax_token_ids, rather than argmax over module.model(...).logits:
+            # both models implement it, and the Mamba2 one reduces the
+            # 262144-wide logits chunk by chunk instead of holding a
+            # [batch, seq, 262144] tensor (6.4 GiB at batch 16) all at once.
+            pred_ids = module.argmax_token_ids(input_ids, attention_mask)
             predicted = torch.nn.functional.pad(pred_ids[:, :-1], (1, 0), value=-1)
             for i in range(len(input_ids)):
                 # Decode ONLY the target region (labels != -100). The model is
@@ -254,6 +266,16 @@ def evaluate_on_test(
         whole_line_correct / n_lines if n_lines else 0.0
     )
 
+    # DFM-Mimir-only: the Mamba2 module has no recurrent-cycle partition, so
+    # the key stays absent there rather than reporting a pair of Nones.
+    h_cycles = getattr(module.model.config, "H_cycles", None)
+    l_cycles = getattr(module.model.config, "L_cycles", None)
+    hrm_cycles = (
+        {"hrm_cycles": {"H_cycles": h_cycles, "L_cycles": l_cycles}}
+        if h_cycles is not None
+        else {}
+    )
+
     metrics = {
         "checkpoint": str(cfg.predict.checkpoint_dir),
         "n_test_samples": len(all_predictions),
@@ -265,10 +287,7 @@ def evaluate_on_test(
         "per_field_accuracy": per_field_accuracy,
         "per_column_accuracy": per_column_accuracy,
         "whole_line_accuracy": whole_line_accuracy,
-        "hrm_cycles": {
-            "H_cycles": getattr(module.model.config, "H_cycles", None),
-            "L_cycles": getattr(module.model.config, "L_cycles", None),
-        },
+        **hrm_cycles,
         "predictions": all_predictions,
     }
 
@@ -286,7 +305,7 @@ def evaluate_on_test(
 
 def generate_for_prompts(
     cfg: DictConfig,
-    module: DFMMimirModule,
+    module: L.LightningModule,
     prompts: List[str],
     output_path: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
@@ -356,11 +375,12 @@ def main(cfg: DictConfig) -> None:
             round(metrics["whole_line_accuracy"] * metrics["n_test_rows"]),
             metrics["n_test_rows"],
         )
-        log.info(
-            "HRM cycles: H=%s L=%s",
-            metrics["hrm_cycles"]["H_cycles"],
-            metrics["hrm_cycles"]["L_cycles"],
-        )
+        if "hrm_cycles" in metrics:
+            log.info(
+                "HRM cycles: H=%s L=%s",
+                metrics["hrm_cycles"]["H_cycles"],
+                metrics["hrm_cycles"]["L_cycles"],
+            )
         log.info("Per-field accuracy:")
         for f, m in metrics.get("per_field_accuracy", {}).items():
             log.info("  %s: %d/%d = %.4f", f, m["correct"], m["total"], m["accuracy"])

@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "torch>=2.13.0",
-    "transformers>=5.15.0",
+    "transformers>=5.16.1",
     "protobuf>=5.29.0",
     "lightning>=2.6.5",
     "optuna>=4.9.0",
@@ -22,6 +22,8 @@ dependencies = [
     "numpy>=2.5.1",
     "accelerate>=1.14.0",
     "wandb>=0.20.0",
+    "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git",
+    "mamba-ssm @ git+https://github.com/state-spaces/mamba.git",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -37,3 +39,11 @@ dev = [
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+
+[tool.uv]
+no-build-isolation-package = ["mamba-ssm", "causal-conv1d"]
+
+# Add this section to provide torch during the build phase
+[tool.uv.extra-build-dependencies]
+mamba-ssm = ["torch"]
+causal-conv1d = ["torch"]

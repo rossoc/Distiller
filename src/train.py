@@ -17,7 +17,6 @@ respectively, both of which import ``run_fold`` from here.
     python src/cv.py data.test_frac=0.2 training.learning_rate=5.0e-5
 """
 
-import inspect
 import logging
 import time
 import warnings
@@ -63,7 +62,7 @@ torch.backends.cudnn.allow_tf32 = True
 
 from callback import OptunaPruningCallback, EpochProgressCallback, _best_checkpoint
 from lit_datamodule import DistillerDataModule
-from model.dfm_mimir import DFMMimirModule
+from model.factory import DEFAULT_KIND, build_module
 from utils import dataloader_runtime, format_seconds, seed_all
 
 log = logging.getLogger(__name__)
@@ -124,29 +123,24 @@ def run_fold(
     offset = fold_idx + (trial.number * 1000 if trial is not None else 0)
     seed_all(cfg.training.seed + offset)
 
+    # Everything under cfg.model (minus the selector itself) plus the shared
+    # optimisation knobs. build_module() keeps only what the selected module's
+    # constructor actually accepts, so a model config group can carry its own
+    # architecture keys without every entrypoint having to know about them.
+    model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
+    kind = model_cfg.pop("kind", DEFAULT_KIND)
     model_kwargs: Dict[str, Any] = {
-        "model_id": cfg.model.model_id,
-        "trust_remote_code": cfg.model.trust_remote_code,
-        "dtype": cfg.model.dtype,
+        **model_cfg,
         "learning_rate": cfg.training.learning_rate,
         "weight_decay": cfg.training.weight_decay,
         "warmup_ratio": cfg.training.warmup_ratio,
         "lr_scheduler": cfg.training.lr_scheduler,
-        "hrm_cycles": (
-            dict(cfg.model.hrm_cycles)
-            if getattr(cfg.model, "hrm_cycles", None) is not None
-            else None
-        ),
     }
 
     if trial is not None:
         _apply_trial_overrides(model_kwargs, cfg, trial.params)
 
-    module = DFMMimirModule(**{
-        k: v
-        for k, v in model_kwargs.items()
-        if k in inspect.signature(DFMMimirModule.__init__).parameters
-    })
+    module = build_module(kind, model_kwargs)
 
     # Build the fold's dataloaders via the shared datamodule — the single
     # source of truth for row-splitting/K-fold-indexing/tokenization/
@@ -189,8 +183,8 @@ def run_fold(
         # compared/aggregated in the W&B UI), rather than every fold's
         # metrics landing on a single run. `reinit=True` forces a fresh
         # wandb run here even though the previous fold's run object is still
-        # alive in this process (we finish() it below, but that belt-and-
-        # braces this against a differently-ordered/early-returning caller).
+        # alive in this process (we finish() it below, but that
+        # belt-and-suspenders this against a differently-ordered/early-returning caller).
         run_name = cfg.wandb.name or cfg.wandb.group or "cv"
         run_name = f"{run_name}_fold{fold_idx}"
         if trial is not None:
@@ -229,17 +223,15 @@ def run_fold(
         )
 
     val_loss = trainer.callback_metrics.get("eval_loss")
-    result: float
-    if val_loss is not None:
-        result = float(val_loss.cpu().item())
+    if val_loss is None:
+        log.warning(
+            "eval_loss missing from callback_metrics — validation likely did "
+            "not run this fold. Returning inf so the fold is scored as "
+            "failed rather than silently recovered via private internals."
+        )
+        result = float("inf")
     else:
-        # Fallback from logger connector
-        logs = trainer.logger_connector._metrics if trainer.logger_connector else {}
-        if "eval_loss" in logs:
-            values = logs["eval_loss"]
-            result = float(values[-1]) if values else float("inf")
-        else:
-            result = float("inf")
+        result = float(val_loss.cpu().item())
 
     # Close out this fold's W&B run so the next fold's WandbLogger starts a
     # fresh run instead of reusing this (still-active-in-process) one.

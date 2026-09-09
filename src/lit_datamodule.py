@@ -36,7 +36,6 @@ from data.loader import (
     split_rows_by_max_length,
     train_test_row_split,
 )
-from model.dfm_mimir import DFMMimirModule
 
 import numpy as np
 
@@ -188,10 +187,19 @@ class DistillerDataModule(L.LightningDataModule):
         self.split_seed = cfg.data.split_seed
         self.max_length = cfg.data.max_length
         self.fold_seed = cfg.data.fold_seed
+        # False (default) = "S_text L_text <field>?" (causal-attention models
+        # like DFM-Mimir, which can attend back over the whole prompt at
+        # generation time). True = "<field>? S_text L_text" (recurrent
+        # models like Mamba2, which need the field name folded into their
+        # running state *before* scanning the source text). See
+        # data.loader.build_samples_by_row and config/data/rnn.yaml.
+        self.prompt_first = cfg.data.get("prompt_first", False)
         self.n_folds = cfg.optuna.n_folds
 
-        # Model ref (for tokenizer + model access)
-        self.module: Optional[DFMMimirModule] = None
+        # Model ref, for tokenizer access. Any of the model modules will
+        # do: this only ever reads `.tokenizer` and `.pad_token_id`, which
+        # every one of them exposes.
+        self.module: Optional[L.LightningModule] = None
 
         # State
         self._train_df: Optional[pl.DataFrame] = None
@@ -226,7 +234,8 @@ class DistillerDataModule(L.LightningDataModule):
     ) -> List[Dict[str, str]]:
         """Build training samples from a DataFrame."""
         return build_samples(
-            df, self.source_columns, self.target_columns, self.unknown_token
+            df, self.source_columns, self.target_columns, self.unknown_token,
+            self.prompt_first,
         )
 
     def _long_row_idx(self, train_df: pl.DataFrame) -> Optional[np.ndarray]:
@@ -248,7 +257,8 @@ class DistillerDataModule(L.LightningDataModule):
         if self.module is None:
             return None
         rows_samples = build_samples_by_row(
-            train_df, self.source_columns, self.target_columns, self.unknown_token
+            train_df, self.source_columns, self.target_columns, self.unknown_token,
+            self.prompt_first,
         )
         short_idx, long_idx = split_rows_by_max_length(
             rows_samples, self.module.tokenizer, self.max_length
@@ -381,7 +391,7 @@ class DistillerDataModule(L.LightningDataModule):
     # Module wiring
     # ------------------------------------------------------------------
 
-    def set_module(self, module: DFMMimirModule) -> None:
+    def set_module(self, module: L.LightningModule) -> None:
         """Attach the model module so we can tokenize and generate."""
         self.module = module
 

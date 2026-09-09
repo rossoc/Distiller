@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import warnings
 from collections import defaultdict
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -35,46 +35,6 @@ warnings.filterwarnings(
 )
 
 # ---------------------------------------------------------------------------
-# Config.yaml loader
-# ---------------------------------------------------------------------------
-
-def load_schema_config(path: Optional[Path] = None) -> Dict[str, Any]:
-    """Load config.yaml (the one with 'simple_diffusion', 'simple_ner', etc.).
-
-    Falls back to CWD, then this file's parent tree.
-    """
-    candidates = [path] if path else []
-    candidates.append(Path.cwd() / "config.yaml")
-    here = Path(__file__).resolve().parent.parent.parent / "config.yaml"
-    candidates.append(here)
-
-    for p in candidates:
-        if p and p.exists():
-            import yaml
-            with open(p) as f:
-                return yaml.safe_load(f)
-    raise FileNotFoundError("config.yaml not found")
-
-
-def get_target_columns(schema: str = "simple_diffusion",
-                       config: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Return the list of target column names for *schema*."""
-    if config is None:
-        config = load_schema_config()
-    entry = config.get(schema, {})
-    return list(entry.get("target", []))
-
-
-def get_feature_columns(schema: str = "simple_diffusion",
-                        config: Optional[Dict[str, Any]] = None) -> List[str]:
-    """Return the list of feature (source) column names for *schema*."""
-    if config is None:
-        config = load_schema_config()
-    entry = config.get(schema, {})
-    return list(entry.get("feature", []))
-
-
-# ---------------------------------------------------------------------------
 # Sample creation
 # ---------------------------------------------------------------------------
 
@@ -83,7 +43,7 @@ def build_samples_by_row(
     source_columns: List[str],
     target_columns: List[str],
     unknown_token: str = "unknown",
-    schema_config: Optional[Dict[str, Any]] = None,
+    prompt_first: bool = False,
 ) -> List[List[Dict[str, str]]]:
     """Like ``build_samples``, but grouped one list-of-samples per DataFrame
     row (in row order) instead of a single flat list.
@@ -93,21 +53,25 @@ def build_samples_by_row(
     ``split_rows_by_max_length``) so all of its target-column samples move as
     one unit, consistent with ``kfold_indices`` splitting at the row level to
     avoid the same source text appearing in both a fold's train and val split.
-    """
-    if schema_config is None:
-        schema_config = load_schema_config()
 
+    Args:
+        prompt_first: if False (default), input = "{source_text} <{col}>?" —
+            the field marker comes last, right before the model starts
+            generating, which is the natural framing for a causal-attention
+            model (DFM-Mimir) that can attend back over the whole prompt at
+            generation time. If True, input = "<{col}>? {source_text}" — the
+            field marker comes first, so a recurrent model (Mamba2) knows
+            what to extract *before* it scans the source text, letting it
+            build that into its running state as it reads instead of having
+            to re-derive it from a state that already collapsed the text.
+    """
     rows_samples: List[List[Dict[str, str]]] = []
     for row in df.iter_rows(named=True):
-        # Build the source text from source_columns (or schema feature columns)
-        src_cols = source_columns or get_feature_columns(
-            schema="simple_diffusion", config=schema_config
-        )
         src_parts = [
             ""
             if (v := row[c]) is None or (isinstance(v, float) and np.isnan(v))
             else str(v).strip()
-            for c in src_cols
+            for c in source_columns
             if c in df.columns
         ]
         source_text = " ".join(p for p in src_parts if p)
@@ -124,8 +88,13 @@ def build_samples_by_row(
                     s = str(val).strip()
                     output = s if s else unknown_token
 
+                field_marker = f"<{col}>?"
                 row_samples.append({
-                    "input": f"{source_text} <{col}>?",
+                    "input": (
+                        f"{field_marker} {source_text}"
+                        if prompt_first
+                        else f"{source_text} {field_marker}"
+                    ),
                     "output": output,
                 })
         rows_samples.append(row_samples)
@@ -137,12 +106,13 @@ def build_samples(
     source_columns: List[str],
     target_columns: List[str],
     unknown_token: str = "unknown",
-    schema_config: Optional[Dict[str, Any]] = None,
+    prompt_first: bool = False,
 ) -> List[Dict[str, str]]:
     """Create training samples from a Polars DataFrame.
 
     Each row × target_column → one sample:
-        input  = "S_text L_text <field_name>"
+        input  = "S_text L_text <field_name>"   (or, if prompt_first,
+                  "<field_name> S_text L_text" — see build_samples_by_row)
         output = "<extracted_value>"  (or unknown_token if empty)
 
     Args:
@@ -150,13 +120,13 @@ def build_samples(
         source_columns: e.g. ["S_text", "L_text"].
         target_columns: list of field names to extract.
         unknown_token: string to use for missing values.
-        schema_config: optional pre-loaded config.yaml dict (for feature columns).
+        prompt_first: see build_samples_by_row.
 
     Returns:
         List of {"input": str, "output": str} dicts.
     """
     rows_samples = build_samples_by_row(
-        df, source_columns, target_columns, unknown_token, schema_config
+        df, source_columns, target_columns, unknown_token, prompt_first
     )
     return [s for row_samples in rows_samples for s in row_samples]
 
@@ -194,15 +164,23 @@ def split_rows_by_max_length(
     return np.array(short_idx, dtype=np.int64), np.array(long_idx, dtype=np.int64)
 
 
+_FIELD_MARKER_RE = re.compile(r"<([^<>]+)>\?")
+
+
 def count_by_target(
     samples: List[Dict[str, str]],
 ) -> Dict[str, int]:
-    """Count samples per target field (the field name is inside <...> in input)."""
+    """Count samples per target field (the field name is inside <...>? in input).
+
+    The marker can sit at either end of ``input`` — the tail, as
+    ``build_samples`` normally writes it, or the head, when built with
+    ``prompt_first=True`` — so it's located by regex rather than assumed to
+    be the last whitespace-delimited token.
+    """
     counts: Dict[str, int] = defaultdict(int)
     for s in samples:
-        field = s["input"].rsplit(" ", 1)[-1]
-        # Strip < and >? markers: "<Pieces1>?" → "Pieces1"
-        field = field.strip("<>?")
+        m = _FIELD_MARKER_RE.search(s["input"])
+        field = m.group(1) if m else s["input"].rsplit(" ", 1)[-1].strip("<>?")
         counts[field] += 1
     return dict(counts)
 
@@ -318,6 +296,7 @@ def build_full_pipeline(
     split_seed: int = 42,
     n_folds: int = 5,
     fold_seed: int = 42,
+    prompt_first: bool = False,
 ) -> Dict[str, Any]:
     """Run the full data preparation pipeline and return everything needed for training.
 
@@ -333,8 +312,12 @@ def build_full_pipeline(
     train_df, test_df = train_test_row_split(df, test_frac, split_seed)
 
     # 2. Build samples
-    train_samples = build_samples(train_df, source_columns, target_columns, unknown_token)
-    test_samples = build_samples(test_df, source_columns, target_columns, unknown_token)
+    train_samples = build_samples(
+        train_df, source_columns, target_columns, unknown_token, prompt_first
+    )
+    test_samples = build_samples(
+        test_df, source_columns, target_columns, unknown_token, prompt_first
+    )
 
     # 3. K-fold on training samples (by index within train_df)
     fold_indices = kfold_indices(len(train_df), n_folds, fold_seed)
@@ -342,11 +325,11 @@ def build_full_pipeline(
     for train_idx, val_idx in fold_indices:
         fold_train_samples = build_samples(
             train_df.gather(train_idx).clone(),
-            source_columns, target_columns, unknown_token,
+            source_columns, target_columns, unknown_token, prompt_first,
         )
         fold_val_samples = build_samples(
             train_df.gather(val_idx).clone(),
-            source_columns, target_columns, unknown_token,
+            source_columns, target_columns, unknown_token, prompt_first,
         )
         folds.append((fold_train_samples, fold_val_samples))
 

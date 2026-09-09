@@ -98,6 +98,24 @@ def test_build_samples_ignores_unknown_target_columns():
     assert len(samples) == 1
 
 
+def test_build_samples_prompt_first_puts_field_marker_before_source_text():
+    df = pl.DataFrame({"S_text": ["hello"], "T": ["v"]})
+    samples = build_samples(df, ["S_text"], ["T"], prompt_first=True)
+    assert samples[0]["input"] == "<T>? hello"
+
+
+def test_build_samples_default_puts_field_marker_after_source_text():
+    df = pl.DataFrame({"S_text": ["hello"], "T": ["v"]})
+    samples = build_samples(df, ["S_text"], ["T"])
+    assert samples[0]["input"] == "hello <T>?"
+
+
+def test_count_by_target_handles_prompt_first_marker_at_head():
+    df = pl.DataFrame({"S_text": ["hello", "world"], "Pieces1": ["3", "4"]})
+    samples = build_samples(df, ["S_text"], ["Pieces1"], prompt_first=True)
+    assert count_by_target(samples) == {"Pieces1": 2}
+
+
 # ---------------------------------------------------------------------------
 # build_samples_by_row
 # ---------------------------------------------------------------------------
