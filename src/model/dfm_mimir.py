@@ -17,20 +17,17 @@ import torch
 import torch.nn as nn
 from transformers import (
     AutoModelForCausalLM,
-    AutoTokenizer,
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
 )
 
 # HF compatibility shims (Hub-noise loggers + the transformers>=5.3
-# TokenizersBackend kwarg regression) live in one place so this module and
-# model.donor_projection cannot drift apart on them.
-from model import hf_compat  # noqa: F401  (imported for its side effects)
+# TokenizersBackend kwarg regression), the shared dtype map, and the
+# pad-token-aware tokenizer loader live in one place so this module and
+# model.mimir_mamba2 cannot drift apart on them.
+from model.hf_compat import DTYPE_MAP, load_tokenizer
 
 log = logging.getLogger(__name__)
-
-# Shared dtype lookup — used by both __init__ and the from_pretrained classmethod.
-_DTYPE_MAP = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
 class DFMMimirModule(L.LightningModule):
@@ -53,14 +50,9 @@ class DFMMimirModule(L.LightningModule):
 
         self.save_hyperparameters()
 
-        self.torch_dtype = _DTYPE_MAP.get(dtype, torch.bfloat16)
+        self.torch_dtype = DTYPE_MAP.get(dtype, torch.bfloat16)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_id,
-            trust_remote_code=trust_remote_code,
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer(model_id, trust_remote_code)
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
@@ -338,13 +330,8 @@ class DFMMimirModule(L.LightningModule):
         **kwargs: Any,
     ) -> "DFMMimirModule":
         """Load a trained DFMMimirModule from disk."""
-        torch_dtype = _DTYPE_MAP.get(dtype, torch.bfloat16)
-        tokenizer = AutoTokenizer.from_pretrained(
-            save_path,
-            trust_remote_code=trust_remote_code,
-        )
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        torch_dtype = DTYPE_MAP.get(dtype, torch.bfloat16)
+        tokenizer = load_tokenizer(save_path, trust_remote_code)
 
         model = AutoModelForCausalLM.from_pretrained(
             save_path,

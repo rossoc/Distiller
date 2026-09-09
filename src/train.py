@@ -183,8 +183,8 @@ def run_fold(
         # compared/aggregated in the W&B UI), rather than every fold's
         # metrics landing on a single run. `reinit=True` forces a fresh
         # wandb run here even though the previous fold's run object is still
-        # alive in this process (we finish() it below, but that
-        # belt-and-suspenders this against a differently-ordered/early-returning caller).
+        # alive in this process (we finish() it below, but this is
+        # belt-and-suspenders against a differently-ordered/early-returning caller).
         run_name = cfg.wandb.name or cfg.wandb.group or "cv"
         run_name = f"{run_name}_fold{fold_idx}"
         if trial is not None:

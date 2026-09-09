@@ -171,14 +171,23 @@ def _full_precision_matmul():
         torch.set_float32_matmul_precision(previous)
 
 
+def _iter_row_chunks(matrix: torch.Tensor, device: str):
+    """Yield ``(start, chunk)`` row-slices of *matrix*, cast to float32 on *device*.
+
+    Shared stepping logic for the three full-table sweeps below, which
+    otherwise differ only in what they do with each chunk.
+    """
+    for start in range(0, matrix.shape[0], _CHUNK_ROWS):
+        yield start, matrix[start : start + _CHUNK_ROWS].to(device, torch.float32)
+
+
 def _gram(matrix: torch.Tensor) -> torch.Tensor:
     """``matrix.T @ matrix`` in float32, accumulated over row chunks."""
     device = _accum_device()
     dim = matrix.shape[1]
     gram = torch.zeros((dim, dim), dtype=torch.float32, device=device)
     with _full_precision_matmul():
-        for start in range(0, matrix.shape[0], _CHUNK_ROWS):
-            chunk = matrix[start : start + _CHUNK_ROWS].to(device, torch.float32)
+        for _, chunk in _iter_row_chunks(matrix, device):
             gram += chunk.T @ chunk
             del chunk
     return gram.cpu()
@@ -190,8 +199,7 @@ def _projected_rms(matrix: torch.Tensor, projection: torch.Tensor) -> float:
     proj = projection.to(device, torch.float32)
     total = torch.zeros((), dtype=torch.float64, device=device)
     with _full_precision_matmul():
-        for start in range(0, matrix.shape[0], _CHUNK_ROWS):
-            chunk = matrix[start : start + _CHUNK_ROWS].to(device, torch.float32)
+        for _, chunk in _iter_row_chunks(matrix, device):
             total += (chunk @ proj).pow(2).sum().double()
             del chunk
     count = matrix.shape[0] * projection.shape[1]
@@ -208,9 +216,8 @@ def _project_table(
         (matrix.shape[0], projection.shape[1]), dtype=out_dtype, device="cpu"
     )
     with _full_precision_matmul():
-        for start in range(0, matrix.shape[0], _CHUNK_ROWS):
-            stop = start + _CHUNK_ROWS
-            chunk = matrix[start:stop].to(device, torch.float32)
+        for start, chunk in _iter_row_chunks(matrix, device):
+            stop = start + chunk.shape[0]
             out[start:stop] = (chunk @ proj).to(out_dtype).cpu()
             del chunk
     return out

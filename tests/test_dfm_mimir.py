@@ -5,7 +5,7 @@ dispatch, the HRM-cycles config patch in __init__, and the _log helper.
 None of this downloads the real HF model: configure_optimizers/_log are
 exercised on a bare object built via __new__ (a tiny real nn.Linear-based
 model for AdamW construction, no HF download); the HRM-cycles test
-monkeypatches AutoTokenizer/AutoModelForCausalLM so the real __init__ runs
+monkeypatches load_tokenizer/AutoModelForCausalLM so the real __init__ runs
 end-to-end against fakes.
 """
 
@@ -171,9 +171,7 @@ class _FakeCausalLM(nn.Module):
 @pytest.fixture
 def fake_hf_backend(monkeypatch):
     monkeypatch.setattr(
-        dfm_mimir_mod.AutoTokenizer,
-        "from_pretrained",
-        lambda model_id, trust_remote_code=True: _FakeTokenizer(),
+        dfm_mimir_mod, "load_tokenizer", lambda model_id, trust_remote_code=True: _FakeTokenizer()
     )
     monkeypatch.setattr(
         dfm_mimir_mod.AutoModelForCausalLM,

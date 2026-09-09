@@ -167,21 +167,26 @@ def split_rows_by_max_length(
 _FIELD_MARKER_RE = re.compile(r"<([^<>]+)>\?")
 
 
-def count_by_target(
-    samples: List[Dict[str, str]],
-) -> Dict[str, int]:
-    """Count samples per target field (the field name is inside <...>? in input).
+def extract_field_name(input_text: str) -> str:
+    """Pull the target field name out of a sample's ``input`` text.
 
     The marker can sit at either end of ``input`` — the tail, as
     ``build_samples`` normally writes it, or the head, when built with
     ``prompt_first=True`` — so it's located by regex rather than assumed to
-    be the last whitespace-delimited token.
+    be the last whitespace-delimited token. The rsplit fallback only matters
+    for input that predates the ``<field>?`` marker format.
     """
+    match = _FIELD_MARKER_RE.search(input_text)
+    return match.group(1) if match else input_text.rsplit(" ", 1)[-1].strip("<>?")
+
+
+def count_by_target(
+    samples: List[Dict[str, str]],
+) -> Dict[str, int]:
+    """Count samples per target field (the field name is inside <...>? in input)."""
     counts: Dict[str, int] = defaultdict(int)
     for s in samples:
-        m = _FIELD_MARKER_RE.search(s["input"])
-        field = m.group(1) if m else s["input"].rsplit(" ", 1)[-1].strip("<>?")
-        counts[field] += 1
+        counts[extract_field_name(s["input"])] += 1
     return dict(counts)
 
 

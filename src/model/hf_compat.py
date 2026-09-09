@@ -10,6 +10,27 @@ from __future__ import annotations
 
 import logging
 
+import torch
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+# Dtype names as they appear in config (``model.dtype``), shared by
+# ``dfm_mimir`` and ``mimir_mamba2`` so the two model kinds can't drift on
+# what "bf16" means.
+DTYPE_MAP = {"bf16": torch.bfloat16, "fp32": torch.float32}
+
+
+def load_tokenizer(model_id: str, trust_remote_code: bool = True) -> PreTrainedTokenizerBase:
+    """Load a tokenizer and make sure it has a pad token.
+
+    Both model kinds need this identically: the donor/base tokenizers here
+    have no pad token defined, and padding is required for batched training.
+    """
+    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
+
+
 # Every AutoTokenizer/AutoModelForCausalLM.from_pretrained() call re-checks
 # the Hub for cache freshness (HEAD requests) even when the model is fully
 # cached locally — each K-fold run reloads the model once per fold, so this

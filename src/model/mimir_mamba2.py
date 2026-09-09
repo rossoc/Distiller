@@ -43,14 +43,13 @@ import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from transformers import (
-    AutoTokenizer,
     Mamba2Config,
     Mamba2ForCausalLM,
     get_cosine_schedule_with_warmup,
     get_linear_schedule_with_warmup,
 )
 
-from model import hf_compat  # noqa: F401  (imported for its side effects)
+from model.hf_compat import DTYPE_MAP, load_tokenizer  # noqa: F401  (side effects + shared helpers)
 from model.donor_projection import (
     ProjectedEmbedding,
     ProjectedLMHead,
@@ -60,8 +59,6 @@ from model.donor_projection import (
 
 log = logging.getLogger(__name__)
 
-_DTYPE_MAP = {"bf16": torch.bfloat16, "fp32": torch.float32}
-
 # Filename used by save_pretrained/from_pretrained for the trainable
 # projections. They are excluded from the exported standalone model (which
 # carries concrete, already-projected tables instead), but are needed to
@@ -70,7 +67,6 @@ _PROJECTIONS_FILE = "donor_projections.pt"
 _PROJECTIONS_META = "donor_projections.json"
 
 _WARNED_SLOW_SCAN = False
-
 
 
 def _warn_if_slow_scan_path() -> None:
@@ -173,17 +169,12 @@ class MimirMamba2Module(L.LightningModule):
 
         self.save_hyperparameters()
 
-        self.torch_dtype = _DTYPE_MAP.get(dtype, torch.bfloat16)
+        self.torch_dtype = DTYPE_MAP.get(dtype, torch.bfloat16)
 
         # --------------------------------------------------------------
         # Tokenizer — the donor's, necessarily: token ids index its tables.
         # --------------------------------------------------------------
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            donor_model_id,
-            trust_remote_code=trust_remote_code,
-        )
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        self.tokenizer = load_tokenizer(donor_model_id, trust_remote_code)
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
@@ -771,7 +762,7 @@ class MimirMamba2Module(L.LightningModule):
                 "donor_model_id was passed — cannot rebuild the frozen tables."
             )
 
-        saved = Mamba2ForCausalLM.from_pretrained(str(path), dtype=_DTYPE_MAP.get(dtype))
+        saved = Mamba2ForCausalLM.from_pretrained(str(path), dtype=DTYPE_MAP.get(dtype))
         config = saved.config
 
         instance = cls(

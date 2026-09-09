@@ -39,7 +39,7 @@ import lightning as L
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from data.loader import _FIELD_MARKER_RE
+from data.loader import extract_field_name
 from lit_datamodule import DistillerDataModule
 from model.factory import DEFAULT_KIND, filter_kwargs, module_class
 from utils import dataloader_runtime
@@ -128,17 +128,10 @@ def evaluate_on_test(
     test_samples = datamodule.get_test_samples()
     log.info("Test samples: %d", len(test_samples))
 
-    # Extract the target column name for each sample. build_samples formats
-    # the field marker as "<{col}>?", placed either at the tail of the input
-    # (default) or the head (data.prompt_first=true, for Mamba2 — see
-    # data.loader.build_samples_by_row), so locate it by regex rather than
-    # assuming a fixed end. This makes per-field/per-column accuracy correct
-    # regardless of ordering or tokenizer merging/decoding artifacts.
-    sample_fields = []
-    for s in test_samples:
-        m = _FIELD_MARKER_RE.search(s["input"])
-        col_name = m.group(1) if m else s["input"].rsplit(" ", 1)[-1].strip("<>?")
-        sample_fields.append(col_name)
+    # Extract the target column name for each sample. This makes per-field/
+    # per-column accuracy correct regardless of marker ordering
+    # (data.prompt_first) or tokenizer merging/decoding artifacts.
+    sample_fields = [extract_field_name(s["input"]) for s in test_samples]
 
     test_dl = datamodule.test_dataloader()
 

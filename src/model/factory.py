@@ -10,6 +10,7 @@ the knobs that model actually has.
 
 from __future__ import annotations
 
+import importlib
 import inspect
 import logging
 from typing import Any, Callable, Dict, Type
@@ -37,8 +38,7 @@ def module_class(kind: str) -> Type[L.LightningModule]:
         raise ValueError(
             f"Unknown model kind {kind!r} — expected one of {sorted(_KINDS)}."
         ) from None
-    imported = __import__(module_path, fromlist=[class_name])
-    return getattr(imported, class_name)
+    return getattr(importlib.import_module(module_path), class_name)
 
 
 def filter_kwargs(func: Callable[..., Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -55,15 +55,10 @@ def filter_kwargs(func: Callable[..., Any], kwargs: Dict[str, Any]) -> Dict[str,
     return {k: v for k, v in kwargs.items() if k in accepted}
 
 
-def supported_kwargs(cls: Type[L.LightningModule], kwargs: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop entries ``cls.__init__`` does not accept."""
-    return filter_kwargs(cls.__init__, kwargs)
-
-
 def build_module(kind: str, kwargs: Dict[str, Any]) -> L.LightningModule:
     """Instantiate the module named by *kind* with whatever of *kwargs* it takes."""
     cls = module_class(kind)
-    accepted = supported_kwargs(cls, kwargs)
+    accepted = filter_kwargs(cls.__init__, kwargs)
     dropped = sorted(set(kwargs) - set(accepted))
     if dropped:
         log.debug("%s ignores config keys: %s", cls.__name__, ", ".join(dropped))

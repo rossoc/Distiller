@@ -2,8 +2,8 @@
 """Tests for model/mimir_mamba2.py — the Mamba2 + frozen-donor module.
 
 Nothing here downloads DFM-Mimir. ``load_donor_tables`` is monkeypatched to
-return a toy 320 x 64 pair of tables and ``AutoTokenizer`` to return a stub, so
-the real ``__init__`` runs end to end (config assembly, projection build,
+return a toy 320 x 64 pair of tables and ``load_tokenizer`` to return a stub,
+so the real ``__init__`` runs end to end (config assembly, projection build,
 module swap, parameter accounting) against fakes. The pure-optimisation and
 pure-loss helpers are additionally exercised on a bare instance.
 """
@@ -46,7 +46,7 @@ def fake_donor(monkeypatch):
         torch.randn(VOCAB, D_DONOR, generator=generator) * 0.03,
         torch.randn(VOCAB, D_DONOR, generator=generator) * 0.05,
     )
-    monkeypatch.setattr(mamba2_mod, "AutoTokenizer", _FakeTokenizer)
+    monkeypatch.setattr(mamba2_mod, "load_tokenizer", lambda *a, **k: _FakeTokenizer())
     monkeypatch.setattr(
         mamba2_mod, "load_donor_tables", lambda *a, **k: tables
     )
