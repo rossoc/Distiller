@@ -35,6 +35,7 @@ import copy
 import importlib.util
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,6 +43,7 @@ import lightning as L
 import torch
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
 from transformers import (
     Mamba2Config,
     Mamba2ForCausalLM,
@@ -83,7 +85,9 @@ def _warn_if_slow_scan_path() -> None:
     if _WARNED_SLOW_SCAN:
         return
     _WARNED_SLOW_SCAN = True
-    if importlib.util.find_spec("mamba_ssm") and importlib.util.find_spec("causal_conv1d"):
+    if importlib.util.find_spec("mamba_ssm") and importlib.util.find_spec(
+        "causal_conv1d"
+    ):
         return
     log.info(
         "mamba-ssm / causal-conv1d are not installed, so Mamba2 runs its "
@@ -241,9 +245,7 @@ class MimirMamba2Module(L.LightningModule):
             for name, param in self.model.backbone.named_parameters():
                 if not name.startswith("embeddings."):
                     param.requires_grad_(False)
-            log.warning(
-                "freeze_backbone=True — only the donor projections will train."
-            )
+            log.warning("freeze_backbone=True — only the donor projections will train.")
 
         _warn_if_slow_scan_path()
         self._log_parameter_budget(tables.vocab_size, tables.d_donor, d_model)
@@ -406,9 +408,7 @@ class MimirMamba2Module(L.LightningModule):
         ``bf16-mixed``.
         """
         logits = self.model.lm_head(hidden_chunk).float()
-        return F.cross_entropy(
-            logits, labels_chunk, ignore_index=-100, reduction="sum"
-        )
+        return F.cross_entropy(logits, labels_chunk, ignore_index=-100, reduction="sum")
 
     def forward(
         self,
@@ -466,7 +466,10 @@ class MimirMamba2Module(L.LightningModule):
                 loss.item(),
             )
             loss = torch.zeros(
-                (), dtype=loss.dtype, device=loss.device, requires_grad=loss.requires_grad
+                (),
+                dtype=loss.dtype,
+                device=loss.device,
+                requires_grad=loss.requires_grad,
             )
 
         return loss, logits
@@ -502,7 +505,9 @@ class MimirMamba2Module(L.LightningModule):
         loss, _ = self.forward(
             batch["input_ids"], batch.get("attention_mask"), batch["labels"]
         )
-        self.log("test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=False)
+        self.log(
+            "test_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=False
+        )
         return loss
 
     # ------------------------------------------------------------------
@@ -525,7 +530,10 @@ class MimirMamba2Module(L.LightningModule):
         proj_lr = base_lr * self.hparams.projection_lr_mult
 
         groups: Dict[str, List[torch.Tensor]] = {
-            "proj_decay": [], "proj_no_decay": [], "body_decay": [], "body_no_decay": []
+            "proj_decay": [],
+            "proj_no_decay": [],
+            "body_decay": [],
+            "body_no_decay": [],
         }
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
@@ -544,9 +552,17 @@ class MimirMamba2Module(L.LightningModule):
         weight_decay = self.hparams.weight_decay
         optimizer = torch.optim.AdamW(
             [
-                {"params": groups["proj_decay"], "weight_decay": weight_decay, "lr": proj_lr},
+                {
+                    "params": groups["proj_decay"],
+                    "weight_decay": weight_decay,
+                    "lr": proj_lr,
+                },
                 {"params": groups["proj_no_decay"], "weight_decay": 0.0, "lr": proj_lr},
-                {"params": groups["body_decay"], "weight_decay": weight_decay, "lr": base_lr},
+                {
+                    "params": groups["body_decay"],
+                    "weight_decay": weight_decay,
+                    "lr": base_lr,
+                },
                 {"params": groups["body_no_decay"], "weight_decay": 0.0, "lr": base_lr},
             ],
             lr=base_lr,
@@ -671,7 +687,9 @@ class MimirMamba2Module(L.LightningModule):
     # ------------------------------------------------------------------
 
     @torch.no_grad()
-    def export_standalone(self, dtype: Optional[torch.dtype] = None) -> Mamba2ForCausalLM:
+    def export_standalone(
+        self, dtype: Optional[torch.dtype] = None
+    ) -> Mamba2ForCausalLM:
         """Collapse the projections into a plain, self-contained Mamba2 model.
 
         This is the step the whole design builds towards: apply the *current*

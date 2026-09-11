@@ -1,0 +1,33 @@
+# Hydra config group: model=mamba2
+# Mamba2 + frozen-donor embedding/head projections (see model/mimir_mamba2.py).
+# Override via: python src/cv.py model=mamba2 model.d_model=768
+
+kind: mamba2
+
+donor_model_id: danish-foundation-models/DFM-Mimir
+trust_remote_code: true
+dtype: bf16
+
+# Backbone width/depth.
+d_model: 512
+num_hidden_layers: 12
+
+# Mamba2 mixer geometry. expand * d_model must be divisible by head_dim.
+state_size: 64
+expand: 2
+head_dim: 64
+n_groups: 1
+conv_kernel: 4
+chunk_size: 32
+
+initializer_range: 0.02
+
+# Donor-table projection (P/Q) setup — see donor_projection.py.
+projection_init: pca
+learn_projection_scales: true
+projection_lr_mult: 1.0
+projection_cache_dir: outputs/donor_cache
+
+freeze_backbone: false
+gradient_checkpointing: true
+loss_chunk_tokens: 512

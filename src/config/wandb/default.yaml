@@ -1,0 +1,33 @@
+# Hydra config group: wandb
+# Weights & Biases experiment tracking. Enable with `wandb.enabled=true`.
+#
+# When enabled, a lightning.pytorch.loggers.WandbLogger is attached to the
+# Trainer and training/validation metrics are streamed to W&B. When disabled
+# (default) no logger is attached and metrics are only printed to stdout via
+# the EpochProgressCallback.
+
+enabled: false
+
+# W&B project (create or reuse on your W&B account)
+project: distiller
+
+# W&B entity/team. Leave null to use your default entity.
+entity: null
+
+# Group these runs together in the W&B UI (e.g. to select all folds of one CV
+# run/trial and compute mean/variance across them). Defaults to the Optuna
+# study name.
+group: ${optuna.study_name}
+
+# Base run name. Each fold gets its own W&B run — see run_fold() in train.py
+# — named "<name>_fold<i>" (plus "_trial<n>" under Optuna) so folds land as
+# separate runs instead of piling onto one. Leave null to name runs from the
+# group alone.
+name: null
+
+# Offline mode: writes to ./wandb/ locally without uploading (sync later with
+# `wandb sync`). Useful when you have no network.
+offline: false
+
+# Optional tags attached to every run.
+tags: []

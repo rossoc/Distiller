@@ -1,0 +1,40 @@
+# Hydra config group: data
+# Override via: python src/train.py data.test_frac=0.2
+
+xlsx_path: data/data_district_heating.xlsx
+sheet_name: Ground Truth
+
+# Source text columns (concatenated for the prompt)
+source_columns:
+  - S_text
+  - L_text
+
+# Target columns (fields to extract)
+target_columns:
+  - Pieces1
+  - Manufacturer1
+  - SubType1
+  - HxType1
+  - NominelEffectEach1
+  - Year1
+
+# Value for missing/empty target cells
+unknown_token: unknown
+
+# Fraction of rows held out as TEST (never used in CV)
+test_frac: 0.15
+
+# Seed for the deterministic train/test row split
+split_seed: 42
+
+# Max token length for the model.
+# DFM-Mimir is an HRM/recurrent model: its effective sequence length is
+# (inner recurrent steps) x max_length, so a large max_length multiplies GPU
+# memory at the lm_head. Rows whose tokenized length exceeds this are never
+# trained on — they're forced into validation-only across every fold instead
+# (see DistillerDataModule._long_row_idx), so raising this recovers more rows
+# for training without needing to touch the K-fold logic.
+max_length: 256
+
+# Seed for deterministic K-fold shuffling
+fold_seed: 42

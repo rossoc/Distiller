@@ -1,0 +1,30 @@
+# Hydra config group: data=rnn
+# Same as data=default, except prompt_first=true: puts the "<field>?" marker
+# BEFORE the source text, so a recurrent model (Mamba2) has the field name
+# folded into its running state before it scans the text, instead of having
+# to re-derive it from state that already collapsed the source. See
+# data.loader.build_samples_by_row / lit_datamodule.py.
+
+xlsx_path: data/data_district_heating.xlsx
+sheet_name: Ground Truth
+
+source_columns:
+  - S_text
+  - L_text
+
+target_columns:
+  - Pieces1
+  - Manufacturer1
+  - SubType1
+  - HxType1
+  - NominelEffectEach1
+  - Year1
+
+unknown_token: unknown
+
+test_frac: 0.15
+split_seed: 42
+max_length: 512
+fold_seed: 42
+
+prompt_first: true

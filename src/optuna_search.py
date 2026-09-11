@@ -14,6 +14,7 @@ from pathlib import Path
 
 import hydra
 import optuna
+import torch
 from omegaconf import DictConfig, OmegaConf
 
 from cv import run_kfold_cv
@@ -86,7 +87,12 @@ def main(cfg: DictConfig) -> None:
         return objective(trial, cfg)
 
     study.optimize(
-        optuna_objective, n_trials=cfg.optuna.n_trials, show_progress_bar=True
+        optuna_objective,
+        n_trials=cfg.optuna.n_trials,
+        show_progress_bar=True,
+        # A trial pushing batch_size/d_model too far and OOMing shouldn't
+        # kill the whole search — record it as a failed trial and move on.
+        catch=(torch.OutOfMemoryError,),
     )
 
     log.info("Optuna study complete.")

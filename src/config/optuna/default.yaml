@@ -1,0 +1,43 @@
+# Hydra config group: optuna
+# Override via: python src/train.py optuna.n_trials=50
+
+n_trials: 20
+n_folds: 5
+study_name: distiller_kfold
+# Persistent study storage. `null` = in-memory (lost when the process exits).
+# Use a sqlite file to KEEP all trials across runs; the study resumes via
+# load_if_exists=True (trials accumulate under study_name). Inspect with:
+#   optuna study summarize --storage sqlite:///optuna.db
+#   optuna-dashboard sqlite:///optuna.db   (pip install optuna-dashboard)
+# Add `optuna.db` to .gitignore so it isn't committed.
+storage: sqlite:///optuna.db
+
+metric: eval_loss
+mode: minimize
+
+pruner:
+  _target_: optuna.pruners.MedianPruner
+  n_startup_trials: 5
+  n_warmup_steps: 2
+
+search_space:
+  learning_rate:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-6
+    high: 1.0e-4
+    log: true
+  weight_decay:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-4
+    high: 0.1
+    log: true
+  batch_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [2, 4]
+  gradient_accumulation_steps:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [1, 2, 4, 8]
+  num_train_epochs:
+    _target_: optuna.trial.Trial.suggest_int
+    low: 1
+    high: 5

@@ -1,0 +1,19 @@
+# predict configuration
+# predict.py NEVER trains — it only (optionally) scores the held-out test set
+# or runs generation on a supplied, already-trained checkpoint.
+#
+# REQUIRED: checkpoint_dir must point at a trained artifact, otherwise the
+# script refuses to run. Acceptable forms:
+#   - a HuggingFace model directory (e.g. <run>/final_model) saved by training
+#   - a Lightning checkpoint file (e.g. <run>/best.ckpt)
+checkpoint_dir: null        # e.g. outputs/final_model  OR  outputs/best.ckpt
+
+mode: evaluate               # "evaluate" (test-set scoring) or "generate" (prompts)
+
+# For "generate" mode
+prompts: []                  # list of prompt strings
+
+# Generation sampling (used by "generate")
+max_new_tokens: 128
+temperature: 0.7
+do_sample: true

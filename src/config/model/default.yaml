@@ -1,0 +1,21 @@
+# Hydra config group: model
+# Override via: python src/train.py model.model_id=local/path
+
+model_id: danish-foundation-models/DFM-Mimir
+trust_remote_code: true
+
+# "bf16" or "fp32"
+dtype: bf16
+
+# Full fine-tuning only. If you add peft later, set this to true.
+use_peft: false
+
+# Optional HRM recurrent-cycle reduction to shrink GPU memory.
+# DFM-Mimir (hrm_text) unrolls H_cycles x L_cycles inner steps per forward;
+# the defaults (2,3) partition the 16 layers into 8 stack-passes. Setting
+# e.g. {H_cycles: 1, L_cycles: 1} cuts that to 2 passes (~4x less activation
+# memory) at some cost to the recurrent modelling. Leave null to keep
+# the model's native cycle counts.
+hrm_cycles:
+  H_cycles: 1
+  L_cycles: 1

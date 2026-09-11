@@ -1,0 +1,66 @@
+# Hydra config group: optuna=mamba2
+# Fast, wide Optuna search over Mamba2 (model=mamba2 data=rnn), 3-fold CV.
+# Override via: python src/optuna_search.py model=mamba2 data=rnn optuna=mamba2
+
+n_trials: 60
+n_folds: 3
+study_name: mamba2_rnn_search
+storage: sqlite:///optuna.db
+
+metric: eval_loss
+mode: minimize
+
+# Aggressive early pruning — fast exploration over exhaustive per-trial training.
+pruner:
+  _target_: optuna.pruners.MedianPruner
+  n_startup_trials: 3
+  n_warmup_steps: 2
+
+search_space:
+  # --- optimization -------------------------------------------------
+  learning_rate:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  weight_decay:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-4
+    high: 0.1
+    log: true
+  warmup_ratio:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 0.0
+    high: 0.1
+  lr_scheduler:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [cosine, linear]
+  batch_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [16, 32]
+  num_train_epochs:
+    _target_: optuna.trial.Trial.suggest_int
+    low: 1
+    high: 3
+
+  # --- Mamba2 architecture ------------------------------------------
+  d_model:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [256, 384, 512]
+  num_hidden_layers:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [8, 12, 16]
+  state_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [32, 64]
+  chunk_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [32, 64]
+  projection_lr_mult:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 0.1
+    high: 10.0
+    log: true
+  projection_init:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [pca, orthogonal, xavier]
