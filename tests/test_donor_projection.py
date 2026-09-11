@@ -183,9 +183,7 @@ def test_stale_cache_with_the_wrong_shape_is_recomputed(tmp_path):
     path = tmp_path / "toy_donor.embed.pca16.pt"
     torch.save(torch.zeros(D_DONOR, D_MODEL + 1), path)
 
-    basis = cached_principal_basis(
-        table, D_MODEL, "toy/donor", "embed", str(tmp_path)
-    )
+    basis = cached_principal_basis(table, D_MODEL, "toy/donor", "embed", str(tmp_path))
     assert basis.shape == (D_DONOR, D_MODEL)
     assert torch.allclose(basis.T @ basis, torch.eye(D_MODEL), atol=1e-4)
 

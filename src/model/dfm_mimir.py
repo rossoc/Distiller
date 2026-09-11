@@ -95,8 +95,12 @@ class DFMMimirModule(L.LightningModule):
         if hrm_cycles:
             _h = hrm_cycles.get("H_cycles", self.model.config.H_cycles)
             _l = hrm_cycles.get("L_cycles", self.model.config.L_cycles)
-            self.model.config.H_cycles = int(_h if _h is not None else self.model.config.H_cycles)
-            self.model.config.L_cycles = int(_l if _l is not None else self.model.config.L_cycles)
+            self.model.config.H_cycles = int(
+                _h if _h is not None else self.model.config.H_cycles
+            )
+            self.model.config.L_cycles = int(
+                _l if _l is not None else self.model.config.L_cycles
+            )
             raw_bp = list(getattr(self.model.config, "L_bp_cycles", []) or [])
             self.model.L_bp_cycles_padded = [1] * max(
                 0, self.model.config.H_cycles - len(raw_bp)
@@ -155,7 +159,10 @@ class DFMMimirModule(L.LightningModule):
                 loss.item(),
             )
             loss = torch.zeros(
-                (), dtype=loss.dtype, device=loss.device, requires_grad=loss.requires_grad
+                (),
+                dtype=loss.dtype,
+                device=loss.device,
+                requires_grad=loss.requires_grad,
             )
 
         return loss, logits
@@ -177,9 +184,7 @@ class DFMMimirModule(L.LightningModule):
         labels = batch["labels"]
 
         loss, _ = self.forward(input_ids, attention_mask, labels)
-        self._log(
-            "train_loss", loss, on_step=True, on_epoch=True, prog_bar=True
-        )
+        self._log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
 
     def validation_step(
@@ -190,9 +195,7 @@ class DFMMimirModule(L.LightningModule):
         labels = batch["labels"]
 
         loss, _ = self.forward(input_ids, attention_mask, labels)
-        self._log(
-            "eval_loss", loss, on_step=False, on_epoch=True, prog_bar=True
-        )
+        self._log("eval_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
         return loss
 
     def test_step(self, batch: Dict[str, torch.Tensor], batch_idx: int) -> torch.Tensor:

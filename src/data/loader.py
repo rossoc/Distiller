@@ -38,6 +38,7 @@ warnings.filterwarnings(
 # Sample creation
 # ---------------------------------------------------------------------------
 
+
 def build_samples_by_row(
     df: pl.DataFrame,
     source_columns: List[str],
@@ -89,14 +90,16 @@ def build_samples_by_row(
                     output = s if s else unknown_token
 
                 field_marker = f"<{col}>?"
-                row_samples.append({
-                    "input": (
-                        f"{field_marker} {source_text}"
-                        if prompt_first
-                        else f"{source_text} {field_marker}"
-                    ),
-                    "output": output,
-                })
+                row_samples.append(
+                    {
+                        "input": (
+                            f"{field_marker} {source_text}"
+                            if prompt_first
+                            else f"{source_text} {field_marker}"
+                        ),
+                        "output": output,
+                    }
+                )
         rows_samples.append(row_samples)
     return rows_samples
 
@@ -194,6 +197,7 @@ def count_by_target(
 # Dataset
 # ---------------------------------------------------------------------------
 
+
 class TextPairDataset(Dataset):
     """Holds (input, output) string pairs for autoregressive training."""
 
@@ -210,6 +214,7 @@ class TextPairDataset(Dataset):
 # ---------------------------------------------------------------------------
 # Deterministic train/test row split
 # ---------------------------------------------------------------------------
+
 
 def train_test_row_split(
     df: pl.DataFrame,
@@ -233,6 +238,7 @@ def train_test_row_split(
 # ---------------------------------------------------------------------------
 # Deterministic K-fold indices (on row indices within the training set)
 # ---------------------------------------------------------------------------
+
 
 def kfold_indices(
     n_rows: int,
@@ -258,7 +264,9 @@ def kfold_indices(
         else np.array([], dtype=np.int64)
     )
     forced_set = set(forced_val_idx.tolist())
-    indices = np.array([i for i in range(n_rows) if i not in forced_set], dtype=np.int64)
+    indices = np.array(
+        [i for i in range(n_rows) if i not in forced_set], dtype=np.int64
+    )
     rng = np.random.default_rng(seed)
     rng.shuffle(indices)
 
@@ -280,6 +288,7 @@ def kfold_indices(
 # Ground truth XLSX loader
 # ---------------------------------------------------------------------------
 
+
 def read_ground_truth(
     xlsx_path: str,
     sheet_name: str = "Ground Truth",
@@ -291,6 +300,7 @@ def read_ground_truth(
 # ---------------------------------------------------------------------------
 # Full data pipeline
 # ---------------------------------------------------------------------------
+
 
 def build_full_pipeline(
     df: pl.DataFrame,
@@ -330,11 +340,17 @@ def build_full_pipeline(
     for train_idx, val_idx in fold_indices:
         fold_train_samples = build_samples(
             train_df.gather(train_idx).clone(),
-            source_columns, target_columns, unknown_token, prompt_first,
+            source_columns,
+            target_columns,
+            unknown_token,
+            prompt_first,
         )
         fold_val_samples = build_samples(
             train_df.gather(val_idx).clone(),
-            source_columns, target_columns, unknown_token, prompt_first,
+            source_columns,
+            target_columns,
+            unknown_token,
+            prompt_first,
         )
         folds.append((fold_train_samples, fold_val_samples))
 
@@ -345,9 +361,7 @@ def build_full_pipeline(
         "n_train_samples": len(train_samples),
         "n_test_samples": len(test_samples),
         "n_folds": n_folds,
-        "train_per_fold": [
-            (len(ft), len(fv)) for ft, fv in folds
-        ],
+        "train_per_fold": [(len(ft), len(fv)) for ft, fv in folds],
         "target_counts_train": count_by_target(train_samples),
         "target_counts_test": count_by_target(test_samples),
     }

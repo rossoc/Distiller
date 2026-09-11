@@ -51,6 +51,7 @@ log = logging.getLogger(__name__)
 # Load a trained checkpoint (HF model dir OR Lightning .ckpt)
 # ---------------------------------------------------------------------------
 
+
 def _load_module_from_checkpoint(
     cfg: DictConfig,
     checkpoint_dir: str,
@@ -101,6 +102,7 @@ def _load_module_from_checkpoint(
 # ---------------------------------------------------------------------------
 # Evaluate a checkpoint on the held-out test set (no training)
 # ---------------------------------------------------------------------------
+
 
 def evaluate_on_test(
     cfg: DictConfig,
@@ -173,26 +175,40 @@ def evaluate_on_test(
                 # would make exact match impossible. Restricting both sides to
                 # the target span yields a meaningful per-sample accuracy.
                 true_mask = labels[i] != -100
-                pred_text = module.tokenizer.decode(
-                    predicted[i][true_mask], skip_special_tokens=True
-                ) if true_mask.any() else ""
-                true_text = module.tokenizer.decode(
-                    labels[i][true_mask], skip_special_tokens=True
-                ) if true_mask.any() else ""
+                pred_text = (
+                    module.tokenizer.decode(
+                        predicted[i][true_mask], skip_special_tokens=True
+                    )
+                    if true_mask.any()
+                    else ""
+                )
+                true_text = (
+                    module.tokenizer.decode(
+                        labels[i][true_mask], skip_special_tokens=True
+                    )
+                    if true_mask.any()
+                    else ""
+                )
                 # Decode only the prompt portion (tokens before the target
                 # span) so the "input" field in predictions doesn't include
                 # the ground-truth output text that was concatenated during
                 # tokenization.
                 prompt_mask = labels[i] == -100
-                inp_text = module.tokenizer.decode(
-                    input_ids[i][prompt_mask], skip_special_tokens=True
-                ) if prompt_mask.any() else ""
-                all_predictions.append({
-                    "input": inp_text,
-                    "field": sample_fields[global_idx + i],
-                    "ground_truth": true_text.strip(),
-                    "prediction": pred_text.strip(),
-                })
+                inp_text = (
+                    module.tokenizer.decode(
+                        input_ids[i][prompt_mask], skip_special_tokens=True
+                    )
+                    if prompt_mask.any()
+                    else ""
+                )
+                all_predictions.append(
+                    {
+                        "input": inp_text,
+                        "field": sample_fields[global_idx + i],
+                        "ground_truth": true_text.strip(),
+                        "prediction": pred_text.strip(),
+                    }
+                )
             global_idx += len(input_ids)
 
     # Per-sample exact-match accuracy = average accuracy per sample.
@@ -237,8 +253,7 @@ def evaluate_on_test(
     # The average accuracy per sample is the exact_match_rate above, but we also
     # emit a per-sample vector so callers can compute the mean over any subset.
     per_sample_accuracy = [
-        1.0 if p["ground_truth"] == p["prediction"] else 0.0
-        for p in all_predictions
+        1.0 if p["ground_truth"] == p["prediction"] else 0.0 for p in all_predictions
     ]
 
     # Whole-line accuracy: groups samples by source row (every n_fields samples
@@ -250,14 +265,9 @@ def evaluate_on_test(
     whole_line_correct = sum(
         1
         for i in range(n_lines)
-        if all(
-            per_sample_accuracy[i * n_fields + j] == 1.0
-            for j in range(n_fields)
-        )
+        if all(per_sample_accuracy[i * n_fields + j] == 1.0 for j in range(n_fields))
     )
-    whole_line_accuracy = (
-        whole_line_correct / n_lines if n_lines else 0.0
-    )
+    whole_line_accuracy = whole_line_correct / n_lines if n_lines else 0.0
 
     # DFM-Mimir-only: the Mamba2 module has no recurrent-cycle partition, so
     # the key stays absent there rather than reporting a pair of Nones.
@@ -296,6 +306,7 @@ def evaluate_on_test(
 # Generate predictions for custom prompts
 # ---------------------------------------------------------------------------
 
+
 def generate_for_prompts(
     cfg: DictConfig,
     module: L.LightningModule,
@@ -303,7 +314,9 @@ def generate_for_prompts(
     output_path: Optional[Path] = None,
 ) -> List[Dict[str, str]]:
     """Generate predictions for a list of prompts using a trained checkpoint."""
-    output_path = output_path or Path(cfg.training.output_dir) / "custom_predictions.json"
+    output_path = (
+        output_path or Path(cfg.training.output_dir) / "custom_predictions.json"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     results = []
@@ -328,6 +341,7 @@ def generate_for_prompts(
 # ---------------------------------------------------------------------------
 # Hydra entrypoint
 # ---------------------------------------------------------------------------
+
 
 @hydra.main(
     config_path=str(Path(__file__).parent / "config"),
@@ -379,9 +393,7 @@ def main(cfg: DictConfig) -> None:
             log.info("  %s: %d/%d = %.4f", f, m["correct"], m["total"], m["accuracy"])
         log.info("Per-column accuracy:")
         for col, m in metrics.get("per_column_accuracy", {}).items():
-            log.info(
-                "  %s: %d/%d = %.4f", col, m["correct"], m["total"], m["accuracy"]
-            )
+            log.info("  %s: %d/%d = %.4f", col, m["correct"], m["total"], m["accuracy"])
 
     elif mode == "generate":
         prompts = cfg.predict.prompts
@@ -389,7 +401,7 @@ def main(cfg: DictConfig) -> None:
             log.error(
                 "No prompts provided. Set predict.prompts in config or override "
                 "on the command line, e.g. "
-                'predict.prompts=\'["your prompt here"]\''
+                "predict.prompts='[\"your prompt here\"]'"
             )
             sys.exit(1)
         generate_for_prompts(cfg, module, prompts)
@@ -398,7 +410,8 @@ def main(cfg: DictConfig) -> None:
         log.error(
             "Unknown mode: %s. Use 'evaluate' or 'generate'. "
             "(interactive mode was removed — predict.py only scores/evaluates "
-            "a supplied checkpoint.)", mode
+            "a supplied checkpoint.)",
+            mode,
         )
         sys.exit(1)
 

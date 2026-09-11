@@ -18,6 +18,7 @@ requiring a fold index — used by ``cv.py`` for CV summary stats and by
 from __future__ import annotations
 
 import logging
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
 
 import hydra
@@ -46,55 +47,67 @@ log = logging.getLogger(__name__)
 # Tokenization helper (NEM-style: datamodule owns tokenization)
 # ---------------------------------------------------------------------------
 
-def _tokenize_pairs(
+
+def _tokenize_pair(
     tokenizer,
-    pad_token_id: int,
-    inputs: List[str],
-    outputs: List[str],
+    inp: str,
+    out: str,
     max_length: int,
-) -> Dict[str, torch.Tensor]:
-    """Tokenize (input, output) pairs for causal LM training.
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Tokenize one (input, output) pair, unpadded: (input_ids, labels).
 
     The single copy of this logic — imported by both ``train.py`` and
-    ``predict.py`` so training and evaluation tokenize identically.
+    ``predict.py`` so training and evaluation tokenize identically. Padding
+    is deliberately not this function's job: see ``_collate_batch``, which
+    pads a batch of these to *its own* max length rather than every sample
+    in a split being pre-padded to the split's single longest sequence.
     """
-    input_ids_list: List[torch.Tensor] = []
-    labels_list: List[torch.Tensor] = []
-    attention_list: List[torch.Tensor] = []
+    full_text = f"{inp}{tokenizer.eos_token}{out}{tokenizer.eos_token}"
+    enc = tokenizer(
+        full_text,
+        max_length=max_length,
+        truncation=True,
+        padding=False,
+        return_tensors=None,
+    )
+    ids = enc["input_ids"]
 
-    for inp, out in zip(inputs, outputs):
-        full_text = f"{inp}{tokenizer.eos_token}{out}{tokenizer.eos_token}"
-        enc = tokenizer(
-            full_text,
-            max_length=max_length,
-            truncation=True,
-            padding=False,
-            return_tensors=None,
-        )
-        ids = enc["input_ids"]
+    inp_enc = tokenizer(
+        inp,
+        max_length=max_length,
+        truncation=True,
+        padding=False,
+        return_tensors=None,
+    )
+    inp_len = len(inp_enc["input_ids"])
 
-        inp_enc = tokenizer(
-            inp,
-            max_length=max_length,
-            truncation=True,
-            padding=False,
-            return_tensors=None,
-        )
-        inp_len = len(inp_enc["input_ids"])
+    labels = ids[:]
+    for i in range(min(inp_len + 1, len(labels))):
+        labels[i] = -100
 
-        labels = ids[:]
-        for i in range(min(inp_len + 1, len(labels))):
-            labels[i] = -100
+    return torch.tensor(ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
 
-        input_ids_list.append(torch.tensor(ids, dtype=torch.long))
-        labels_list.append(torch.tensor(labels, dtype=torch.long))
+
+def _pad_batch(
+    input_ids_list: List[torch.Tensor],
+    labels_list: List[torch.Tensor],
+    pad_token_id: int,
+) -> Dict[str, torch.Tensor]:
+    """Pad a list of variable-length (input_ids, labels) pairs to the
+    longest sequence *in this list* — the one padding pass shared by both
+    whole-split tokenization (``_tokenize_pairs``) and per-batch collation
+    (``_collate_batch``); only how much gets passed in at once differs.
+    """
+    attention_list = [
         # Built from the real (pre-pad) length, not from comparing token ids
         # against pad_token_id — when the tokenizer has no dedicated pad
         # token, pad_token_id falls back to eos_token_id, and eos_token
         # appears inside every real sequence (as the input/output separator
         # and terminator). Masking by id would zero out those real positions
         # too, not just the padded tail.
-        attention_list.append(torch.ones(len(ids), dtype=torch.long))
+        torch.ones(len(ids), dtype=torch.long)
+        for ids in input_ids_list
+    ]
 
     input_ids = torch.nn.utils.rnn.pad_sequence(
         input_ids_list, batch_first=True, padding_value=pad_token_id
@@ -113,35 +126,73 @@ def _tokenize_pairs(
     }
 
 
+def _tokenize_pairs(
+    tokenizer,
+    pad_token_id: int,
+    inputs: List[str],
+    outputs: List[str],
+    max_length: int,
+) -> Dict[str, torch.Tensor]:
+    """Tokenize (input, output) pairs, padded to the longest one *among
+    them*. Kept for callers that want a single self-contained padded batch
+    out of a whole list of samples (predict.py's held-out scoring, tests);
+    ``_TokenizedDataset``/``_collate_batch`` no longer route the training
+    dataloaders' per-split tokenization through this — see their docstrings.
+    """
+    input_ids_list, labels_list = [], []
+    for inp, out in zip(inputs, outputs):
+        ids, labels = _tokenize_pair(tokenizer, inp, out, max_length)
+        input_ids_list.append(ids)
+        labels_list.append(labels)
+    return _pad_batch(input_ids_list, labels_list, pad_token_id)
+
+
+def _collate_batch(
+    samples: List[Tuple[torch.Tensor, torch.Tensor]], pad_token_id: int
+) -> Dict[str, torch.Tensor]:
+    """``DataLoader`` collate function: pads one batch to *its own* longest
+    sequence, not the whole split's. Every sample in a split used to be
+    padded up front to that split's single longest sequence (worsened by
+    the forced-long rows ``_long_row_idx`` deliberately routes into
+    validation), so every batch paid for the split's longest outlier even
+    when none of its own rows were unusually long. Padding per batch instead
+    means a batch of short rows costs only as much as its own longest row.
+    """
+    input_ids_list = [ids for ids, _ in samples]
+    labels_list = [labels for _, labels in samples]
+    return _pad_batch(input_ids_list, labels_list, pad_token_id)
+
+
 # ---------------------------------------------------------------------------
 # Tokenized dataset (Lightning-style, replaces the copy in train.py / predict.py)
 # ---------------------------------------------------------------------------
 
+
 class _TokenizedDataset(Dataset):
-    """Wraps tokenized inputs/labels for the Lightning DataLoader."""
+    """Unpadded (input_ids, labels) pairs, one per sample.
+
+    Padding happens per-batch, in ``_collate_batch`` (the DataLoader's
+    ``collate_fn``) — not here — so that a batch of short rows is never
+    padded out to some other, longer row's length elsewhere in the split.
+    """
 
     def __init__(
         self,
-        input_ids: torch.Tensor,
-        labels: torch.Tensor,
-        attention_mask: torch.Tensor,
+        input_ids: List[torch.Tensor],
+        labels: List[torch.Tensor],
     ) -> None:
         self.input_ids = input_ids
         self.labels = labels
-        self.attention_mask = attention_mask
 
     def __len__(self) -> int:
         return len(self.input_ids)
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        return {
-            "input_ids": self.input_ids[idx],
-            "attention_mask": self.attention_mask[idx],
-            "labels": self.labels[idx],
-        }
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        return self.input_ids[idx], self.labels[idx]
 
 
 # ---------------------------------------------------------------------------
+
 
 class DistillerDataModule(L.LightningDataModule):
     """K-fold cross-validation LightningDataModule for DFM-Mimir.
@@ -204,7 +255,9 @@ class DistillerDataModule(L.LightningDataModule):
         # State
         self._train_df: Optional[pl.DataFrame] = None
         self._test_df: Optional[pl.DataFrame] = None
-        self._folds: Optional[List[Tuple[List[Dict[str, str]], List[Dict[str, str]]]]] = None
+        self._folds: Optional[
+            List[Tuple[List[Dict[str, str]], List[Dict[str, str]]]]
+        ] = None
         self._train_samples: Optional[List[Dict[str, str]]] = None
         self._test_samples: Optional[List[Dict[str, str]]] = None
 
@@ -222,19 +275,18 @@ class DistillerDataModule(L.LightningDataModule):
         if self._train_df is not None:
             return self._train_df, self._test_df
         df = read_ground_truth(self.xlsx_path, self.sheet_name)
-        train_df, test_df = train_test_row_split(
-            df, self.test_frac, self.split_seed
-        )
+        train_df, test_df = train_test_row_split(df, self.test_frac, self.split_seed)
         self._train_df = train_df.clone()
         self._test_df = test_df.clone()
         return train_df, test_df
 
-    def _build_samples(
-        self, df: pl.DataFrame
-    ) -> List[Dict[str, str]]:
+    def _build_samples(self, df: pl.DataFrame) -> List[Dict[str, str]]:
         """Build training samples from a DataFrame."""
         return build_samples(
-            df, self.source_columns, self.target_columns, self.unknown_token,
+            df,
+            self.source_columns,
+            self.target_columns,
+            self.unknown_token,
             self.prompt_first,
         )
 
@@ -257,7 +309,10 @@ class DistillerDataModule(L.LightningDataModule):
         if self.module is None:
             return None
         rows_samples = build_samples_by_row(
-            train_df, self.source_columns, self.target_columns, self.unknown_token,
+            train_df,
+            self.source_columns,
+            self.target_columns,
+            self.unknown_token,
             self.prompt_first,
         )
         short_idx, long_idx = split_rows_by_max_length(
@@ -275,32 +330,31 @@ class DistillerDataModule(L.LightningDataModule):
 
     def _tokenize(
         self, samples: List[Dict[str, str]]
-    ) -> Dict[str, torch.Tensor]:
-        """Tokenize samples using the module's tokenizer."""
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """Tokenize samples using the module's tokenizer, unpadded.
+
+        Padding is deferred to ``_collate_batch`` (per DataLoader batch), not
+        done here (per split) — see ``_TokenizedDataset``.
+        """
         if self.module is None:
             raise RuntimeError("module not set — call set_module() first")
-        texts = [s["input"] for s in samples]
-        outputs = [s["output"] for s in samples]
-        return _tokenize_pairs(
-            self.module.tokenizer,
-            self.module.pad_token_id,
-            texts,
-            outputs,
-            self.max_length,
-        )
+        input_ids_list, labels_list = [], []
+        for s in samples:
+            ids, labels = _tokenize_pair(
+                self.module.tokenizer, s["input"], s["output"], self.max_length
+            )
+            input_ids_list.append(ids)
+            labels_list.append(labels)
+        return input_ids_list, labels_list
 
-    def _make_dataset(
-        self, samples: List[Dict[str, str]]
-    ) -> _TokenizedDataset:
+    def _make_dataset(self, samples: List[Dict[str, str]]) -> _TokenizedDataset:
         """Tokenize samples and wrap in a _TokenizedDataset."""
-        tok = self._tokenize(samples)
-        return _TokenizedDataset(
-            tok["input_ids"], tok["labels"], tok["attention_mask"]
-        )
+        input_ids_list, labels_list = self._tokenize(samples)
+        return _TokenizedDataset(input_ids_list, labels_list)
 
-    def _build_dataloader(
-        self, dataset: Dataset, shuffle: bool = False
-    ) -> DataLoader:
+    def _build_dataloader(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
+        if self.module is None:
+            raise RuntimeError("module not set — call set_module() first")
         kwargs: Dict[str, Any] = {
             "batch_size": self.cfg.training.batch_size,
             "shuffle": shuffle,
@@ -310,6 +364,11 @@ class DistillerDataModule(L.LightningDataModule):
             # keeps the effective batch size (and grad-accumulation math)
             # consistent across steps; eval loaders keep every sample.
             "drop_last": shuffle,
+            # Pad each batch to its own longest sequence, not the whole
+            # split's — see _collate_batch.
+            "collate_fn": partial(
+                _collate_batch, pad_token_id=self.module.pad_token_id
+            ),
         }
         # Use eval batch size (eval_batch_multiplier * train) for non-shuffled
         # (val/test) loaders. Defaults to 1 (same as train) — val/test batches
@@ -320,13 +379,9 @@ class DistillerDataModule(L.LightningDataModule):
             eval_batch_multiplier = self.cfg.training.get("eval_batch_multiplier", 1)
             kwargs["batch_size"] = eval_batch_multiplier * self.cfg.training.batch_size
         if kwargs["num_workers"] > 0:
-            kwargs["persistent_workers"] = bool(
-                self.runtime["persistent_workers"]
-            )
+            kwargs["persistent_workers"] = bool(self.runtime["persistent_workers"])
             if self.runtime["prefetch_factor"] is not None:
-                kwargs["prefetch_factor"] = int(
-                    self.runtime["prefetch_factor"]
-                )
+                kwargs["prefetch_factor"] = int(self.runtime["prefetch_factor"])
         return DataLoader(dataset, **kwargs)
 
     # ------------------------------------------------------------------
@@ -412,9 +467,7 @@ class DistillerDataModule(L.LightningDataModule):
         if self.val_dataset is None:
             raise RuntimeError("setup() not called")
         if self.fold == -1:
-            raise RuntimeError(
-                "fold=-1 mode: use folds directly, not val_dataloader()"
-            )
+            raise RuntimeError("fold=-1 mode: use folds directly, not val_dataloader()")
         return self._build_dataloader(self.val_dataset, shuffle=False)
 
     def test_dataloader(self) -> DataLoader:

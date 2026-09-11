@@ -39,7 +39,14 @@ class FakeTokenizer:
     def eos_token_id(self) -> int:
         return self._id("<eos>")
 
-    def __call__(self, text, max_length=None, truncation=False, padding=False, return_tensors=None):
+    def __call__(
+        self,
+        text,
+        max_length=None,
+        truncation=False,
+        padding=False,
+        return_tensors=None,
+    ):
         ids = [self._id(tok) for tok in text.split()]
         if truncation and max_length is not None:
             ids = ids[:max_length]

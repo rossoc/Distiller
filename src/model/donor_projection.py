@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Frozen-donor embedding / LM-head projections.
 
 The idea: a ~1B causal LM (DFM-Mimir) spends most of its parameters on two
@@ -47,10 +46,10 @@ import logging
 import math
 import re
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 import torch
-import torch.nn as nn
+from torch import nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM
 
@@ -66,7 +65,7 @@ _CHUNK_ROWS = 16384
 # sweep calls run_fold() once per fold (and once per fold *per Optuna trial*)
 # in a single process; without this every one of those would re-load the full
 # 1B donor just to read two matrices out of it.
-_DONOR_CACHE: Dict[Tuple[str, torch.dtype], "DonorTables"] = {}
+_DONOR_CACHE: dict[tuple[str, torch.dtype], DonorTables] = {}
 
 
 def _accum_device() -> str:
@@ -121,7 +120,7 @@ def load_donor_tables(
         dtype=dtype,
     )
     with torch.no_grad():
-        embed = donor.get_input_embeddings().weight.detach().to("cpu", dtype).clone()
+        embed = donor.get_input_embeddings().weight.detach().to("cpu", dtype).clone()  # type: ignore
         out_embed = donor.get_output_embeddings()
         # A tied-embedding donor has no separate head — the embedding table
         # *is* the head. DFM-Mimir is untied, so this is just defensiveness.
@@ -153,16 +152,7 @@ def load_donor_tables(
 
 @contextlib.contextmanager
 def _full_precision_matmul():
-    """Run the enclosed float32 matmuls at full precision, not TF32.
-
-    ``train.py`` turns TF32 on process-wide, which is the right trade for
-    training: 10 mantissa bits for a large speedup on every step. It is the
-    wrong trade for the sweeps in this module. They run once, so the speed is
-    irrelevant, and their outputs are not activations but the projection basis
-    and the exported model's actual weight tables — where TF32 costs about
-    three decimal digits (measured: 1.5e-2 absolute error against a float64
-    reference, versus 1.3e-5 at full precision).
-    """
+    """Run the enclosed float32 matmuls at full precision"""
     previous = torch.get_float32_matmul_precision()
     torch.set_float32_matmul_precision("highest")
     try:
@@ -172,11 +162,7 @@ def _full_precision_matmul():
 
 
 def _iter_row_chunks(matrix: torch.Tensor, device: str):
-    """Yield ``(start, chunk)`` row-slices of *matrix*, cast to float32 on *device*.
-
-    Shared stepping logic for the three full-table sweeps below, which
-    otherwise differ only in what they do with each chunk.
-    """
+    """Yield ``(start, chunk)`` row-slices of *matrix*, cast to float32 on device"""
     for start in range(0, matrix.shape[0], _CHUNK_ROWS):
         yield start, matrix[start : start + _CHUNK_ROWS].to(device, torch.float32)
 
@@ -268,7 +254,7 @@ def cached_principal_basis(
     out_dim: int,
     model_id: str,
     table: str,
-    cache_dir: Optional[str],
+    cache_dir: str | None,
 ) -> torch.Tensor:
     """``principal_basis`` memoised to disk.
 
@@ -370,7 +356,7 @@ class ProjectedEmbedding(nn.Module):
         with torch.no_grad():
             self.proj.weight.copy_(projection.T)
 
-        self.scale: Optional[nn.Parameter] = None
+        self.scale: nn.Parameter | None = None
         if learn_scale:
             rms = _projected_rms(donor, projection)
             self.scale = nn.Parameter(
@@ -380,11 +366,7 @@ class ProjectedEmbedding(nn.Module):
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         # Gather-then-project: identical to indexing the materialized small
         # table, but only the rows actually in the batch are touched.
-        #
-        # The explicit cast is what lets the donor table stay in the training
-        # dtype (bf16, 805 MiB) while the trainable projection stays float32
-        # under mixed precision — the two operands would otherwise disagree.
-        rows = F.embedding(input_ids, self.donor).to(self.proj.weight.dtype)
+        rows = F.embedding(input_ids, self.donor).to(self.proj.weight.dtype)  # type: ignore
         out = self.proj(rows)
         return out if self.scale is None else out * self.scale.to(out.dtype)
 
@@ -396,7 +378,7 @@ class ProjectedEmbedding(nn.Module):
         updated" step made explicit — used when exporting a standalone model.
         """
         scale = 1.0 if self.scale is None else float(self.scale)
-        return _project_table(self.donor, self.proj.weight.T * scale, dtype)
+        return _project_table(self.donor, self.proj.weight.T * scale, dtype)  # type: ignore
 
     def extra_repr(self) -> str:
         return (
@@ -437,7 +419,7 @@ class ProjectedLMHead(nn.Module):
         with torch.no_grad():
             self.proj.weight.copy_(projection)
 
-        self.scale: Optional[nn.Parameter] = None
+        self.scale: nn.Parameter | None = None
         if learn_scale:
             # Target logits of order 1 for a unit-RMS hidden state: such a
             # vector has norm sqrt(in_dim), so logits land around
@@ -487,8 +469,8 @@ def build_projections(
     d_model: int,
     init: str = "pca",
     learn_scales: bool = True,
-    cache_dir: Optional[str] = None,
-) -> Tuple[ProjectedEmbedding, ProjectedLMHead]:
+    cache_dir: str | None = None,
+) -> tuple[ProjectedEmbedding, ProjectedLMHead]:
     """Build the embedding and head projections off one set of donor tables.
 
     The two get independent projections: DFM-Mimir is untied
@@ -503,6 +485,8 @@ def build_projections(
         tables.head, d_model, init, tables.model_id, "head", cache_dir
     )
     return (
-        ProjectedEmbedding(tables.embed, d_model, embed_basis, learn_scale=learn_scales),
+        ProjectedEmbedding(
+            tables.embed, d_model, embed_basis, learn_scale=learn_scales
+        ),
         ProjectedLMHead(tables.head, d_model, head_basis, learn_scale=learn_scales),
     )

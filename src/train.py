@@ -95,6 +95,44 @@ def _apply_trial_overrides(
                 cfg.training[key] = value
 
 
+def _resolve_trainer_precision(
+    model_dtype: Optional[str], trainer_precision: str
+) -> str:
+    """Keep ``trainer.precision`` consistent with ``model.dtype``.
+
+    ``bf16-true`` casts the *whole* module — parameters AND buffers — to
+    bf16 during Trainer setup (see ``MimirMamba2Module``'s own comment on
+    why its trainable params are deliberately left float32 for Lightning to
+    cast). That means ``model.dtype=fp32`` on its own (loading the donor
+    tables as float32) would silently get undone the moment the Trainer
+    attaches, unless ``trainer.precision`` is switched to ``"32-true"`` too
+    — two separate overrides that are easy to desync (set one, forget the
+    other, and land back on a mix of fp32 donor tables + bf16 everything
+    else, which is *more* casts, not fewer). Forcing them to agree here
+    makes ``model.dtype=fp32`` the one flag that actually gets genuine
+    all-float32 training end to end: no bf16 tensors anywhere means every
+    ``.to(dtype)`` cast already sprinkled through transformers' Mamba2
+    implementation (RMSNorm's fp32 upcast/downcast, the SSM math, etc.)
+    becomes a same-dtype no-op instead of a real copy.
+
+    The trade-off this doesn't remove: bf16 is what the fused
+    mamba_ssm/causal_conv1d kernels and cuBLAS's tensor-core matmuls are
+    actually fast at (~80%+ of a training step's CUDA time, per profiling)
+    — fp32 avoids the ~10% spent on casts but very likely loses much more
+    than that on the matmul/scan compute itself, plus roughly doubles
+    memory. Expect this to be a net slowdown; it's here to measure, not a
+    recommended default.
+    """
+    if model_dtype == "fp32" and trainer_precision != "32-true":
+        log.info(
+            "model.dtype=fp32 -> forcing trainer.precision=32-true (was %r) "
+            "so nothing gets cast back to bf16 when the Trainer attaches.",
+            trainer_precision,
+        )
+        return "32-true"
+    return trainer_precision
+
+
 # ---------------------------------------------------------------------------
 # Single CV fold — the one function this module exposes
 # ---------------------------------------------------------------------------
@@ -129,6 +167,10 @@ def run_fold(
     # architecture keys without every entrypoint having to know about them.
     model_cfg = OmegaConf.to_container(cfg.model, resolve=True)
     kind = model_cfg.pop("kind", DEFAULT_KIND)
+    cfg.trainer.precision = _resolve_trainer_precision(
+        model_cfg.get("dtype"), cfg.trainer.precision
+    )
+
     model_kwargs: Dict[str, Any] = {
         **model_cfg,
         "learning_rate": cfg.training.learning_rate,

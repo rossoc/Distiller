@@ -85,7 +85,9 @@ def dataloader_runtime(runtime_cfg: DictConfig) -> Dict[str, Any]:
             "num_workers": num_workers,
             "pin_memory": pin_memory,
             "persistent_workers": bool(runtime_cfg.persistent_workers),
-            "prefetch_factor": int(prefetch_factor) if prefetch_factor is not None else None,
+            "prefetch_factor": int(prefetch_factor)
+            if prefetch_factor is not None
+            else None,
         }
     return {
         "num_workers": 0,

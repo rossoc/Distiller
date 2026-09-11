@@ -10,6 +10,7 @@ Usage:
     cd /home/local/4BC/Distiller
     .venv/bin/python scripts/eval_all_checkpoints.py
 """
+
 from __future__ import annotations
 
 import json
@@ -67,19 +68,21 @@ def main(cfg: DictConfig) -> None:
         module = _load_module_from_checkpoint(cfg, str(ckpt))
         metrics = evaluate_on_test(cfg, module)
 
-        results.append({
-            "checkpoint": name,
-            "avg_accuracy_per_sample": metrics["avg_accuracy_per_sample"],
-            "whole_line_accuracy": metrics["whole_line_accuracy"],
-            "exact_matches": metrics["exact_matches"],
-            "n_test_samples": metrics["n_test_samples"],
-            "n_test_rows": metrics["n_test_rows"],
-            "hrm_cycles": metrics["hrm_cycles"],
-            "per_column_accuracy": {
-                col: m["accuracy"]
-                for col, m in metrics["per_column_accuracy"].items()
-            },
-        })
+        results.append(
+            {
+                "checkpoint": name,
+                "avg_accuracy_per_sample": metrics["avg_accuracy_per_sample"],
+                "whole_line_accuracy": metrics["whole_line_accuracy"],
+                "exact_matches": metrics["exact_matches"],
+                "n_test_samples": metrics["n_test_samples"],
+                "n_test_rows": metrics["n_test_rows"],
+                "hrm_cycles": metrics["hrm_cycles"],
+                "per_column_accuracy": {
+                    col: m["accuracy"]
+                    for col, m in metrics["per_column_accuracy"].items()
+                },
+            }
+        )
 
         # Save per-checkpoint full predictions
         safe_name = name.replace("/", "_").replace(".ckpt", "")
@@ -96,15 +99,19 @@ def main(cfg: DictConfig) -> None:
 
     # Print table
     print("\n" + "=" * 95)
-    print(f"{'Checkpoint':<42} {'Avg Acc/Sample':>16} {'Whole-Line':>12} {'Matches':>10} {'HRM':>10}")
+    print(
+        f"{'Checkpoint':<42} {'Avg Acc/Sample':>16} {'Whole-Line':>12} {'Matches':>10} {'HRM':>10}"
+    )
     print("=" * 95)
     for r in results:
         hrm = f"H={r['hrm_cycles']['H_cycles']},L={r['hrm_cycles']['L_cycles']}"
-        print(f"{r['checkpoint']:<42} {r['avg_accuracy_per_sample']:>16.4f} "
-              f"{r['whole_line_accuracy']:>12.4f} {r['exact_matches']:>10} {hrm:>10}")
+        print(
+            f"{r['checkpoint']:<42} {r['avg_accuracy_per_sample']:>16.4f} "
+            f"{r['whole_line_accuracy']:>12.4f} {r['exact_matches']:>10} {hrm:>10}"
+        )
     print("=" * 95)
-    overall = sum(r['avg_accuracy_per_sample'] for r in results) / len(results)
-    overall_wl = sum(r['whole_line_accuracy'] for r in results) / len(results)
+    overall = sum(r["avg_accuracy_per_sample"] for r in results) / len(results)
+    overall_wl = sum(r["whole_line_accuracy"] for r in results) / len(results)
     print(f"{'OVERALL AVERAGE':<42} {overall:>16.4f} {overall_wl:>12.4f}")
     print("=" * 95)
 

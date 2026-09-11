@@ -47,9 +47,7 @@ def fake_donor(monkeypatch):
         torch.randn(VOCAB, D_DONOR, generator=generator) * 0.05,
     )
     monkeypatch.setattr(mamba2_mod, "load_tokenizer", lambda *a, **k: _FakeTokenizer())
-    monkeypatch.setattr(
-        mamba2_mod, "load_donor_tables", lambda *a, **k: tables
-    )
+    monkeypatch.setattr(mamba2_mod, "load_donor_tables", lambda *a, **k: tables)
     return tables
 
 
@@ -113,9 +111,7 @@ def test_cache_is_off_for_training(fake_donor):
 
 def test_freeze_backbone_leaves_only_the_projections_trainable(fake_donor):
     module = _module(freeze_backbone=True)
-    trainable = {
-        n for n, p in module.model.named_parameters() if p.requires_grad
-    }
+    trainable = {n for n, p in module.model.named_parameters() if p.requires_grad}
     assert trainable == {
         "backbone.embeddings.proj.weight",
         "backbone.embeddings.scale",
@@ -210,6 +206,138 @@ def test_fully_masked_batch_yields_a_finite_zero_loss(fake_donor):
     for name, param in module.model.named_parameters():
         if param.grad is not None:
             assert float(param.grad.abs().sum()) == 0.0, name
+
+
+def test_genuine_non_finite_loss_is_replaced_without_a_python_bool_branch(fake_donor):
+    """forward()'s degenerate-batch guard used to be
+    `if not torch.isfinite(loss):` — a Python bool() of a CUDA tensor, i.e. a
+    blocking host sync on *every* call, finite or not. It's now
+    `torch.where(finite, loss, ...)`, entirely on-tensor. Exercise the actual
+    non-finite path (loss_chunk_tokens=0 forces HF's one-shot
+    reduction="mean" loss, which is nan on an all-masked batch — the
+    _chunked_loss path short-circuits before ever producing a non-finite
+    value, so it can't be used to test this branch) and check the same two
+    guarantees the old code made: a finite 0 loss, and zero gradient."""
+    module = _module(loss_chunk_tokens=0)
+    ids = torch.randint(0, VOCAB, (2, 9))
+    labels = torch.full_like(ids, -100)
+
+    loss, _ = module(ids, torch.ones_like(ids), labels)
+    assert torch.isfinite(loss) and float(loss.detach()) == 0.0
+
+    loss.backward()  # must not raise
+    for name, param in module.model.named_parameters():
+        if param.grad is not None:
+            assert float(param.grad.abs().sum()) == 0.0, name
+
+
+def test_guard_nonfinite_loss_never_syncs_to_host(fake_donor, monkeypatch):
+    """The whole point of the torch.where rewrite: _guard_nonfinite_loss must
+    never call Tensor.__bool__/.item() itself, on either the finite or the
+    non-finite path (torch.isfinite(...) alone is fine — it's a tensor op,
+    not a host sync). Scoped to this one method (not the full forward()),
+    since forward() also runs the Mamba2 backbone, whose own library code
+    (transformers' attention-mask handling) does unrelated host syncs that
+    have nothing to do with this fix."""
+    module = _module()
+
+    def _boom(self, *a, **k):
+        raise AssertionError("_guard_nonfinite_loss synced a tensor to host")
+
+    monkeypatch.setattr(torch.Tensor, "__bool__", _boom, raising=True)
+    monkeypatch.setattr(torch.Tensor, "item", _boom, raising=True)
+    try:
+        finite_out = module._guard_nonfinite_loss(torch.tensor(1.5, requires_grad=True))
+        nan_out = module._guard_nonfinite_loss(
+            torch.tensor(float("nan"), requires_grad=True)
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert float(finite_out.detach()) == 1.5
+    assert torch.isfinite(nan_out) and float(nan_out.detach()) == 0.0
+    assert int(module._degenerate_batch_count.item()) == 1
+
+
+def test_degenerate_batch_count_is_accumulated_on_gpu_and_flushed_per_epoch(
+    fake_donor, caplog
+):
+    """The old per-batch warning is now a per-epoch summary, synced once via
+    on_train_epoch_end/on_validation_epoch_end instead of once per forward()
+    call — same visibility, a fraction of the host syncs."""
+    module = _module(loss_chunk_tokens=0)
+    ids = torch.randint(0, VOCAB, (2, 9))
+    degenerate_labels = torch.full_like(ids, -100)
+    normal_labels = ids.clone()
+
+    module(ids, torch.ones_like(ids), degenerate_labels)
+    module(ids, torch.ones_like(ids), normal_labels)
+    module(ids, torch.ones_like(ids), degenerate_labels)
+    assert int(module._degenerate_batch_count.item()) == 2
+
+    with caplog.at_level("WARNING"):
+        module.on_train_epoch_end()
+    assert "2 degenerate" in caplog.text
+    assert int(module._degenerate_batch_count.item()) == 0  # reset
+
+    # A clean epoch logs nothing.
+    caplog.clear()
+    module(ids, torch.ones_like(ids), normal_labels)
+    with caplog.at_level("WARNING"):
+        module.on_validation_epoch_end()
+    assert caplog.text == ""
+
+
+@pytest.mark.parametrize(
+    "batch,seq,chunk", [(1, 17, 5), (2, 9, 4), (5, 13, 3), (4, 6, 64)]
+)
+def test_chunked_loss_matches_a_naive_slice_then_flatten_reference(
+    fake_donor, batch, seq, chunk
+):
+    """``_chunked_loss`` flattens hidden_states/labels *before* slicing off
+    the row-boundary element (to keep the flatten a zero-copy view) and
+    patches the resulting cross-row-boundary label pairs back to -100
+    instead. That reindexing must match the naive
+    ``hidden_states[:, :-1].reshape(...)`` / ``labels[:, 1:].reshape(...)``
+    it replaces, across batch/seq/chunk shapes that do and don't divide
+    evenly (a batch of 1 has no boundary to patch at all)."""
+    module = _module()
+    module.eval()
+    ids = torch.randint(0, VOCAB, (batch, seq))
+    labels = ids.clone()
+    labels[:, :2] = -100  # a couple of masked prompt tokens, like real data
+
+    module.hparams.loss_chunk_tokens = chunk
+    got, _ = module(ids, torch.ones_like(ids), labels)
+
+    hidden_states = module.model.backbone(
+        input_ids=ids, use_cache=False, return_dict=True
+    )[0]
+    d_model = hidden_states.shape[-1]
+    ref_hidden = hidden_states[:, :-1].reshape(-1, d_model)
+    ref_labels = labels[:, 1:].reshape(-1)
+    expected = torch.nn.functional.cross_entropy(
+        module.model.lm_head(ref_hidden).float(),
+        ref_labels,
+        ignore_index=-100,
+        reduction="sum",
+    ) / int((ref_labels != -100).sum())
+
+    assert float(got.detach()) == pytest.approx(float(expected.detach()), abs=1e-4)
+
+
+def test_flatten_then_slice_avoids_copying_hidden_states(fake_donor):
+    """The whole point of flattening before slicing (rather than the other
+    way around) is that it never copies the [B, T, d_model] hidden states —
+    only a same-storage view is taken. Pin that down directly, since a
+    future edit that reorders the ops back to slice-then-flatten would
+    silently reintroduce the O(B*T*d_model) copy this was written to avoid,
+    while still passing the purely numerical tests above."""
+    hidden_states = torch.randn(4, 9, 6)
+    d_model = hidden_states.shape[-1]
+    flat_hidden = hidden_states.reshape(-1, d_model)[:-1]
+    assert flat_hidden.data_ptr() == hidden_states.data_ptr()
+    assert flat_hidden.is_contiguous()
 
 
 def test_chunks_that_are_entirely_masked_are_skipped_not_averaged_in(fake_donor):
@@ -329,8 +457,12 @@ def test_ssm_scalars_and_norms_are_excluded_from_weight_decay(fake_donor):
 
     decayed = {id(p) for p in body_decay["params"]}
     named = dict(module.model.named_parameters())
-    for name in ("backbone.layers.0.mixer.A_log", "backbone.layers.0.mixer.D",
-                 "backbone.layers.0.mixer.dt_bias", "backbone.norm_f.weight"):
+    for name in (
+        "backbone.layers.0.mixer.A_log",
+        "backbone.layers.0.mixer.D",
+        "backbone.layers.0.mixer.dt_bias",
+        "backbone.norm_f.weight",
+    ):
         assert id(named[name]) not in decayed, f"{name} should not be decayed"
     assert id(named["backbone.layers.0.mixer.in_proj.weight"]) in decayed
 

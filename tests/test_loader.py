@@ -123,7 +123,9 @@ def test_count_by_target_handles_prompt_first_marker_at_head():
 
 def test_build_samples_by_row_groups_by_row_and_flattens_like_build_samples():
     df = _sample_df()
-    rows_samples = build_samples_by_row(df, ["S_text", "L_text"], ["Pieces1", "Pieces2"])
+    rows_samples = build_samples_by_row(
+        df, ["S_text", "L_text"], ["Pieces1", "Pieces2"]
+    )
     assert len(rows_samples) == len(df)  # one entry per row
     assert [len(rs) for rs in rows_samples] == [2, 2, 2]  # 2 target columns each
     flat = [s for rs in rows_samples for s in rs]
@@ -236,9 +238,7 @@ def test_kfold_indices_deterministic():
 def test_kfold_indices_different_seed_differs():
     folds_a = kfold_indices(30, 4, seed=1)
     folds_b = kfold_indices(30, 4, seed=2)
-    assert not all(
-        np.array_equal(va, vb) for (_, va), (_, vb) in zip(folds_a, folds_b)
-    )
+    assert not all(np.array_equal(va, vb) for (_, va), (_, vb) in zip(folds_a, folds_b))
 
 
 def test_kfold_indices_forced_val_idx_always_in_val_never_in_train():

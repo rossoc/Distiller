@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Tests for train.py::_apply_trial_overrides — a plain function of a dict +
-config + dict, no real Optuna Trial/model/Hydra entrypoint needed."""
+"""Tests for train.py::_apply_trial_overrides and _resolve_trainer_precision
+— plain functions of a dict/string + config, no real Optuna Trial/model/
+Hydra entrypoint needed."""
 
 from __future__ import annotations
 
 from omegaconf import OmegaConf
 
-from train import _apply_trial_overrides
+from train import _apply_trial_overrides, _resolve_trainer_precision
 
 
 def _cfg():
@@ -54,3 +55,30 @@ def test_empty_trial_params_is_noop():
     _apply_trial_overrides(model_kwargs, cfg, {})
     assert model_kwargs == {"learning_rate": 2e-5}
     assert dict(cfg.training) == before
+
+
+# ---------------------------------------------------------------------------
+# _resolve_trainer_precision
+# ---------------------------------------------------------------------------
+
+
+def test_fp32_dtype_forces_32_true_precision():
+    assert _resolve_trainer_precision("fp32", "bf16-true") == "32-true"
+
+
+def test_fp32_dtype_leaves_matching_precision_alone():
+    # Already "32-true" -- no log spam, same value returned.
+    assert _resolve_trainer_precision("fp32", "32-true") == "32-true"
+
+
+def test_bf16_dtype_leaves_precision_untouched():
+    assert _resolve_trainer_precision("bf16", "bf16-true") == "bf16-true"
+    # Even an unusual choice (e.g. bf16-mixed) is the caller's call to make
+    # for the bf16 case -- only fp32 is forced.
+    assert _resolve_trainer_precision("bf16", "bf16-mixed") == "bf16-mixed"
+
+
+def test_missing_dtype_leaves_precision_untouched():
+    # model.dtype not set at all (falls back to MimirMamba2Module's own
+    # "bf16" default) must not be mistaken for the fp32 case.
+    assert _resolve_trainer_precision(None, "bf16-true") == "bf16-true"

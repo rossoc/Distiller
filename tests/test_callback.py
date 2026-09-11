@@ -20,7 +20,9 @@ from callback import (
 
 
 class _StubTrainer:
-    def __init__(self, current_epoch=0, max_epochs=10, metrics=None, sanity_checking=False):
+    def __init__(
+        self, current_epoch=0, max_epochs=10, metrics=None, sanity_checking=False
+    ):
         self.current_epoch = current_epoch
         self.max_epochs = max_epochs
         self.callback_metrics = metrics or {}
@@ -56,7 +58,9 @@ def test_epoch_progress_callback_logs_every_n_epochs(caplog):
 
 def test_epoch_progress_callback_logs_on_matching_epoch(caplog):
     cb = EpochProgressCallback(log_every_n_epochs=2)
-    trainer = _StubTrainer(current_epoch=1, metrics={"train_loss": 1.0, "eval_loss": 2.0})
+    trainer = _StubTrainer(
+        current_epoch=1, metrics={"train_loss": 1.0, "eval_loss": 2.0}
+    )
     with caplog.at_level(logging.INFO, logger="distiller.epoch"):
         cb.on_train_epoch_end(trainer, None)
     assert len(caplog.records) == 1

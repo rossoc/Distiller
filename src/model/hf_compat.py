@@ -1,11 +1,3 @@
-# -*- coding: utf-8 -*-
-"""Shared HuggingFace compatibility shims.
-
-Imported for its side effects by every module that loads a DFM-Mimir
-tokenizer (``model.dfm_mimir``, ``model.donor_projection``). Importing it
-twice is a no-op — the patch is applied exactly once, at first import.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -19,13 +11,17 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 DTYPE_MAP = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
-def load_tokenizer(model_id: str, trust_remote_code: bool = True) -> PreTrainedTokenizerBase:
+def load_tokenizer(
+    model_id: str, trust_remote_code: bool = True
+) -> PreTrainedTokenizerBase:
     """Load a tokenizer and make sure it has a pad token.
 
     Both model kinds need this identically: the donor/base tokenizers here
     have no pad token defined, and padding is required for batched training.
     """
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_id, trust_remote_code=trust_remote_code
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer

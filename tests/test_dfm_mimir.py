@@ -130,7 +130,12 @@ def test_log_uses_logger_true_when_trainer_logger_attached():
     bare, logged = _bare_with_log()
     bare.trainer = SimpleNamespace(logger=object())
     DFMMimirModule._log(bare, "train_loss", 1.23, on_step=True)
-    assert logged == {"name": "train_loss", "value": 1.23, "on_step": True, "logger": True}
+    assert logged == {
+        "name": "train_loss",
+        "value": 1.23,
+        "on_step": True,
+        "logger": True,
+    }
 
 
 def test_log_uses_logger_false_when_trainer_logger_is_none():
@@ -171,7 +176,9 @@ class _FakeCausalLM(nn.Module):
 @pytest.fixture
 def fake_hf_backend(monkeypatch):
     monkeypatch.setattr(
-        dfm_mimir_mod, "load_tokenizer", lambda model_id, trust_remote_code=True: _FakeTokenizer()
+        dfm_mimir_mod,
+        "load_tokenizer",
+        lambda model_id, trust_remote_code=True: _FakeTokenizer(),
     )
     monkeypatch.setattr(
         dfm_mimir_mod.AutoModelForCausalLM,
@@ -219,7 +226,9 @@ def _bare_forward_module(loss_value):
 def test_forward_replaces_nan_loss_with_zero():
     bare = _bare_forward_module(float("nan"))
     loss, _ = DFMMimirModule.forward(
-        bare, input_ids=torch.zeros(1, 1, dtype=torch.long), labels=torch.full((1, 1), -100)
+        bare,
+        input_ids=torch.zeros(1, 1, dtype=torch.long),
+        labels=torch.full((1, 1), -100),
     )
     assert loss.item() == 0.0
     assert torch.isfinite(loss)
@@ -228,7 +237,9 @@ def test_forward_replaces_nan_loss_with_zero():
 def test_forward_replaces_inf_loss_with_zero():
     bare = _bare_forward_module(float("inf"))
     loss, _ = DFMMimirModule.forward(
-        bare, input_ids=torch.zeros(1, 1, dtype=torch.long), labels=torch.full((1, 1), -100)
+        bare,
+        input_ids=torch.zeros(1, 1, dtype=torch.long),
+        labels=torch.full((1, 1), -100),
     )
     assert loss.item() == 0.0
 
@@ -236,6 +247,8 @@ def test_forward_replaces_inf_loss_with_zero():
 def test_forward_leaves_finite_loss_untouched():
     bare = _bare_forward_module(2.5)
     loss, _ = DFMMimirModule.forward(
-        bare, input_ids=torch.zeros(1, 1, dtype=torch.long), labels=torch.zeros(1, 1, dtype=torch.long)
+        bare,
+        input_ids=torch.zeros(1, 1, dtype=torch.long),
+        labels=torch.zeros(1, 1, dtype=torch.long),
     )
     assert loss.item() == 2.5

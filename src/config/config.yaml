@@ -25,7 +25,7 @@ trainer:
   enable_checkpointing: true
   default_root_dir: ${training.output_dir}
   deterministic: false
-  benchmark: true
+  benchmark: false
   devices: auto
   accelerator: auto
   precision: bf16-true

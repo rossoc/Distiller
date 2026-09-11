@@ -25,7 +25,9 @@ from utils import configure_cuda_fast_path, resolve_device, seed_all
 log = logging.getLogger(__name__)
 
 
-def run_kfold_cv(cfg: DictConfig, trial: Optional[optuna.Trial] = None) -> Dict[str, Any]:
+def run_kfold_cv(
+    cfg: DictConfig, trial: Optional[optuna.Trial] = None
+) -> Dict[str, Any]:
     """Run K-fold CV once (optionally under an Optuna trial) and summarize it.
 
     If *trial* is given, checks ``trial.should_prune()`` before each fold and

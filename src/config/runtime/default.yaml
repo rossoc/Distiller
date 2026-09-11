@@ -2,18 +2,7 @@
 # DataLoader worker/pinning tuning — independent of what data/model/training
 # specify. Override via: python src/cv.py runtime.num_workers=4
 
-# Number of DataLoader worker processes. 0 = load in the main process (GPU
-# can stall between batches). 2-4 keeps the GPU fed; only raise if the
-# dataloader is the bottleneck (check nvidia-smi utilisation, not just guess).
-num_workers: 2
-
-# "auto" = torch.cuda.is_available(); or force true/false.
+num_workers: 8
 pin_memory: auto
-
-# Keep worker processes alive across epochs instead of respawning them every
-# epoch. Only applied when num_workers > 0 (PyTorch errors otherwise).
 persistent_workers: true
-
-# Batches each worker preloads ahead of time. Only applied when
-# num_workers > 0 (PyTorch errors otherwise).
 prefetch_factor: 4

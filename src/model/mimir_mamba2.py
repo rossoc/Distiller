@@ -103,23 +103,13 @@ class MimirMamba2Module(L.LightningModule):
     Args:
         donor_model_id: Model whose embedding table, output head, and
             tokenizer are reused. Its weights are never updated.
-        d_model: Width of the small model. Must not exceed the donor's width.
+        d_model: embeddings' size
         num_hidden_layers: Number of Mamba2 blocks.
         state_size / expand / head_dim / n_groups / conv_kernel / chunk_size:
-            Mamba2 mixer geometry. ``expand * d_model`` must be divisible by
-            ``head_dim`` — the constructor checks and says so if it is not.
-            ``chunk_size`` is the SSM scan's block length; without the fused
-            kernels it also sets the size of the scan's
-            ``[batch, seq, chunk_size, heads, state]`` float32 temporaries, so
-            it is a memory knob as much as an accuracy one.
-        initializer_range: Std of the normal init for the Mamba2 blocks.
-            Mamba2Config defaults to 0.1, which is wide for a 512-unit
-            model trained from scratch; 0.02 is the usual choice at this
-            width and is what this module defaults to.
+            Mamba2 mixer geometry. ``expand * d_model`` must be divisible by ``head_dim``.
+            ``chunk_size`` is the SSM scan's block length
+        initializer_range: 0.02 is this module default
         projection_init: ``pca`` (default), ``orthogonal``, or ``xavier``.
-            ``pca`` starts each projection at the donor table's own leading
-            principal subspace, which is the best linear compression that
-            ``d_model`` dimensions can hold.
         learn_projection_scales: Learn one scalar gain per projection,
             initialised so embeddings start at unit RMS and logits at O(1).
         projection_lr_mult: LR multiplier for ``P``/``Q`` relative to the
@@ -128,17 +118,10 @@ class MimirMamba2Module(L.LightningModule):
             them, so this is worth having as a knob; 1.0 keeps one LR.
         projection_cache_dir: Where to cache PCA bases across runs. ``null``
             disables caching and recomputes them every time.
-        freeze_backbone: Train only the projections, leaving the Mamba2 blocks
-            at their initialisation. Diagnostic, not a normal training mode.
+        freeze_backbone: Train only the projections, leaving the Mamba2 blocks at their initialisation.
         gradient_checkpointing: Recompute each Mamba2 block during backward
-            instead of holding its activations. Costs ~20% compute and is
-            close to mandatory without the fused kernels, whose pure-PyTorch
-            fallback keeps several large float32 scan intermediates per layer.
-        loss_chunk_tokens: Positions per chunk in the chunked cross-entropy
-            (see ``_chunked_loss``). 0 falls back to HF's one-shot loss, which
-            needs a ``[batch, seq, 262144]`` float32 logit tensor and its
-            gradient resident at once — 2 GiB per 8x256 batch, before the
-            softmax's own temporaries.
+            instead of holding its activations. Costs ~20% compute.
+        loss_chunk_tokens: Positions per chunk in the chunked cross-entropy.
     """
 
     def __init__(
@@ -250,6 +233,13 @@ class MimirMamba2Module(L.LightningModule):
         _warn_if_slow_scan_path()
         self._log_parameter_budget(tables.vocab_size, tables.d_donor, d_model)
 
+        # Counts non-finite-loss batches (see forward()'s degenerate-batch
+        # guard) entirely on-GPU, with no host sync on the hot path — synced
+        # and reported once per epoch instead, in _report_and_reset_degenerate_count().
+        self.register_buffer(
+            "_degenerate_batch_count", torch.zeros(()), persistent=False
+        )
+
     # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
@@ -346,46 +336,36 @@ class MimirMamba2Module(L.LightningModule):
     def _chunked_loss(
         self, hidden_states: torch.Tensor, labels: torch.Tensor
     ) -> torch.Tensor:
-        """Causal-LM cross-entropy over the donor-sized vocabulary, in slices.
-
-        The donor's vocabulary is 262144 tokens wide, so a single ``[B, T, V]``
-        float32 logit tensor for an 8x256 batch is 2 GiB — and the backward
-        pass needs its gradient alongside it. That, not the 21M-parameter body,
-        is what decides the batch size this model can train at.
-
-        So the head is applied to ``loss_chunk_tokens`` positions at a time,
-        each chunk wrapped in ``torch.utils.checkpoint``: the forward pass
-        keeps only the chunk's hidden states, and its logits are recomputed
-        (and freed again) one chunk at a time during backward. Peak logit
-        memory becomes a function of the chunk size instead of the batch size,
-        which is what lets a 16x256 batch fit in 15 GiB.
-
-        Numerically this is the same mean-over-unmasked-tokens cross-entropy
-        HF computes, on the same one-position shift: ``logits[t]`` is scored
-        against ``labels[t+1]``.
-        """
+        """Causal-LM cross-entropy over the donor-sized vocabulary, in slices."""
         d_model = hidden_states.shape[-1]
-        flat_hidden = hidden_states[:, :-1].reshape(-1, d_model)
-        flat_labels = labels[:, 1:].reshape(-1)
+        batch, seq_len = hidden_states.shape[0], hidden_states.shape[1]
 
-        n_valid = int((flat_labels != -100).sum())
-        if n_valid == 0:
-            # Every label masked — see the guard in forward() for when that
-            # happens. Zero, but reached *through* hidden_states so the result
-            # still carries a grad_fn: Lightning calls .backward() on whatever
-            # training_step returns, and a bare zeros() leaf would raise
-            # "element 0 of tensors does not require grad". Multiplying by 0
-            # gives every parameter a zero gradient, i.e. the batch is skipped
-            # rather than allowed to corrupt the update.
-            return (hidden_states.sum() * 0.0).float()
+        flat_hidden = hidden_states.reshape(-1, d_model)[:-1]
+        flat_labels = labels.reshape(-1)[1:].clone()
+        if batch > 1:
+            row_end = torch.arange(1, batch, device=labels.device) * seq_len - 1
+            flat_labels[row_end] = -100
 
         chunk = self.hparams.loss_chunk_tokens
+        total_tokens = flat_labels.shape[0]
+        n_chunks = (total_tokens + chunk - 1) // chunk
+
+        valid = flat_labels != -100
+        chunk_ids = torch.arange(total_tokens, device=flat_labels.device) // chunk
+        counts = torch.zeros(n_chunks, device=flat_labels.device, dtype=torch.long)
+        counts.scatter_add_(0, chunk_ids, valid.long())
+        counts_list = counts.tolist()  # single sync
+        n_valid = sum(counts_list)
+
+        if n_valid == 0:
+            return (hidden_states.sum() * 0.0).float()
+
         total = torch.zeros((), device=hidden_states.device, dtype=torch.float32)
-        for start in range(0, flat_hidden.shape[0], chunk):
-            labels_chunk = flat_labels[start : start + chunk]
-            if not bool((labels_chunk != -100).any()):
+        for i, start in enumerate(range(0, total_tokens, chunk)):
+            if counts_list[i] == 0:
                 continue  # all-padding slice: contributes nothing, costs 0
             hidden_chunk = flat_hidden[start : start + chunk]
+            labels_chunk = flat_labels[start : start + chunk]
             total = total + checkpoint(
                 self._chunk_cross_entropy,
                 hidden_chunk,
@@ -442,37 +422,70 @@ class MimirMamba2Module(L.LightningModule):
             )
             loss, logits = outputs.loss, outputs.logits
 
-        if loss is not None and not torch.isfinite(loss):
-            # Degenerate batch: every example's labels got fully masked to
-            # -100 (e.g. the prompt alone already filled max_length before
-            # truncation left room for any output tokens). HF's
-            # CrossEntropyLoss(ignore_index=-100, reduction="mean") then
-            # divides by zero valid tokens -> nan, silently (no exception).
-            # (_chunked_loss short-circuits that case itself, so this guard
-            # only ever fires on the HF path — or on a genuine nan from
-            # somewhere else, which it is also the right response to.)
-            # Left alone, that one nan poisons the *whole* epoch's averaged
-            # train/eval loss (mean of anything containing nan is nan) and
-            # every downstream consumer of it (checkpoint selection, Optuna
-            # pruning/reporting, W&B) — so surface a finite 0 instead. A
-            # fresh zero leaf (not wired into the autograd graph) also means
-            # this batch contributes no gradient, i.e. it's skipped for
-            # training rather than corrupting the model with a nan update.
-            log.warning(
-                "Non-finite loss (%s) from a batch with no valid (non -100) "
-                "label tokens — likely max_length too short for these "
-                "examples' prompts. Reporting loss=0 for this batch instead "
-                "of letting it poison the epoch average.",
-                loss.item(),
-            )
-            loss = torch.zeros(
-                (),
-                dtype=loss.dtype,
-                device=loss.device,
-                requires_grad=loss.requires_grad,
-            )
+        if loss is not None:
+            loss = self._guard_nonfinite_loss(loss)
 
         return loss, logits
+
+    def _guard_nonfinite_loss(self, loss: torch.Tensor) -> torch.Tensor:
+        """Replace a non-finite loss with a finite, zero-gradient 0 — on-GPU.
+
+        Degenerate batch: every example's labels got fully masked to -100
+        (e.g. the prompt alone already filled max_length before truncation
+        left room for any output tokens). HF's
+        ``CrossEntropyLoss(ignore_index=-100, reduction="mean")`` then divides
+        by zero valid tokens -> nan, silently (no exception). (``_chunked_loss``
+        short-circuits that case itself, so this only ever fires on the HF
+        one-shot path — or on a genuine nan from somewhere else, which it is
+        also the right response to.) Left alone, that one nan poisons the
+        *whole* epoch's averaged train/eval loss (mean of anything containing
+        nan is nan) and every downstream consumer of it (checkpoint
+        selection, Optuna pruning/reporting, W&B) — so surface a finite 0
+        instead.
+
+        This used to be ``if not torch.isfinite(loss): ...`` — using a 0-d
+        CUDA tensor's truthiness in a Python ``if`` forces a blocking
+        GPU->CPU sync (``.__bool__()``) on *every* call, i.e. every training
+        and validation step, not just the (rare) degenerate ones.
+        ``torch.where`` keeps the finite/non-finite decision entirely on-GPU:
+        no sync, and (verified) its backward still zeroes the gradient on the
+        non-finite branch exactly like the old fresh-zero-leaf did, so a
+        degenerate batch still contributes no gradient. The count of how
+        often this actually fires is accumulated on-GPU too
+        (``_degenerate_batch_count``) and reported/reset once per epoch
+        (``_report_and_reset_degenerate_count``) instead of synced here.
+        """
+        finite = torch.isfinite(loss)
+        self._degenerate_batch_count += (~finite).to(self._degenerate_batch_count.dtype)
+        return torch.where(finite, loss, loss.new_zeros(()))
+
+    def _report_and_reset_degenerate_count(self, stage: str) -> None:
+        """Sync+log the non-finite-loss counter once per epoch (see forward()).
+
+        One `.item()` per epoch instead of one `torch.isfinite(...).__bool__()`
+        per step — same visibility into degenerate batches, at a fraction of
+        the host-sync cost.
+        """
+        n = int(self._degenerate_batch_count.item())
+        self._degenerate_batch_count.zero_()
+        if n:
+            log.warning(
+                "%d degenerate (fully-masked / non-finite-loss) %s batch(es) "
+                "this epoch — reported as loss=0 (no gradient contribution) "
+                "instead of poisoning the epoch average. Likely max_length "
+                "too short for some examples' prompts.",
+                n,
+                stage,
+            )
+
+    def on_train_epoch_end(self) -> None:
+        self._report_and_reset_degenerate_count("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._report_and_reset_degenerate_count("validation")
+
+    def on_test_epoch_end(self) -> None:
+        self._report_and_reset_degenerate_count("test")
 
     def _log(self, name: str, value, **kwargs: Any) -> None:
         # Route to the configured logger only when one is actually attached;
