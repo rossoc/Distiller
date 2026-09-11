@@ -198,11 +198,9 @@ def run_fold(
     callbacks: List[Any] = [EpochProgressCallback(log_every_n_epochs=1)]
     if trial is not None:
         callbacks.append(OptunaPruningCallback(trial, monitor="eval_loss"))
-        # Suppress progress bar + model summary during search
         trainer_cfg = OmegaConf.create(
             OmegaConf.to_container(cfg.trainer, resolve=True)
         )
-        trainer_cfg.enable_progress_bar = False
         trainer_cfg.enable_model_summary = False
     else:
         # Not an Optuna trial: keep exactly one checkpoint for this fold —
