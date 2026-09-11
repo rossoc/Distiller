@@ -4,8 +4,8 @@
 
 n_trials: 60
 n_folds: 3
-study_name: mamba2_rnn_search
-storage: sqlite:///optuna.db
+study_name: mamba2_rnn_search2
+storage: sqlite:///mamba.db
 
 metric: eval_loss
 mode: minimize
@@ -37,25 +37,25 @@ search_space:
     choices: [cosine, linear]
   batch_size:
     _target_: optuna.trial.Trial.suggest_categorical
-    choices: [16, 32]
+    choices: [64]
   num_train_epochs:
     _target_: optuna.trial.Trial.suggest_int
-    low: 1
+    low: 3
     high: 3
 
   # --- Mamba2 architecture ------------------------------------------
   d_model:
     _target_: optuna.trial.Trial.suggest_categorical
-    choices: [256, 384, 512]
+    choices: [256, 512]
   num_hidden_layers:
     _target_: optuna.trial.Trial.suggest_categorical
-    choices: [8, 12, 16]
+    choices: [4, 8, 12, 16]
   state_size:
     _target_: optuna.trial.Trial.suggest_categorical
     choices: [32, 64]
   chunk_size:
     _target_: optuna.trial.Trial.suggest_categorical
-    choices: [32, 64]
+    choices: [128, 256]
   projection_lr_mult:
     _target_: optuna.trial.Trial.suggest_float
     low: 0.1
@@ -63,4 +63,4 @@ search_space:
     log: true
   projection_init:
     _target_: optuna.trial.Trial.suggest_categorical
-    choices: [pca, orthogonal, xavier]
+    choices: [pca, xavier]
