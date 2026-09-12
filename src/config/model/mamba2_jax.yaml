@@ -1,0 +1,49 @@
+# Hydra config group: model=mamba2_jax
+# Mamba2 + frozen-donor embedding/head projections, Flax NNX
+# (see model_jax/mimir_mamba2.py). The JAX sibling of model/mamba2.yaml —
+# same geometry, same defaults, so the two backends are directly comparable.
+#
+# Override via: python src/cv_jax.py model=mamba2_jax model.d_model=768
+
+kind: mamba2_jax
+
+# Where `scripts/convert_donor_checkpoint.py` wrote the converted tables and
+# the donor's tokenizer. The JAX path never loads the donor through
+# transformers' trust_remote_code machinery — that happens once, offline.
+donor_dir: outputs/donor_jax
+
+# Backbone width/depth.
+d_model: 512
+num_hidden_layers: 12
+
+# Mamba2 mixer geometry. expand * d_model must be divisible by head_dim.
+state_size: 64
+expand: 2
+head_dim: 64
+n_groups: 1
+conv_kernel: 4
+
+# The SSM scan's block length — the same meaning as on the PyTorch path.
+# The JAX backbone implements the chunked (segment-sum) scan, exactly like
+# transformers' `mamba2_chunk_scan`, so this stays a real memory/compute knob
+# on both backends rather than drifting apart between them.
+chunk_size: 32
+
+initializer_range: 0.02
+
+# Donor-table projection (P/Q) setup — see model_jax/donor_projection.py.
+# The PCA cache is shared with the PyTorch path's directory but uses .npz
+# files, so the two coexist without either reading the other's format.
+projection_init: pca
+learn_projection_scales: true
+projection_lr_mult: 1.0
+projection_cache_dir: outputs/donor_cache
+
+freeze_backbone: false
+
+# Recompute each Mamba2 block during backward (nnx.remat) instead of holding
+# its activations. Not optional at production geometry — the chunked scan's
+# intra-chunk tensors are what dominate activation memory.
+gradient_checkpointing: true
+
+loss_chunk_tokens: 512

@@ -1,0 +1,79 @@
+# Hydra config group: optuna=mamba2_jax
+# The JAX sibling of optuna/mamba2.yaml. Same search space, same pruner.
+# Override via: python src/optuna_search_jax.py model=mamba2_jax data=rnn optuna=mamba2_jax
+
+n_trials: 60
+n_folds: 3
+
+# A separate study name and DB file from the PyTorch search (mamba.db).
+# The two backends are numerically equivalent but not performance-equivalent,
+# and a pruner comparing a JAX trial against a PyTorch trial's history would
+# be comparing wall-clock-incomparable runs. Keep the histories apart.
+study_name: mamba2_jax_rnn_search
+storage: sqlite:///mamba_jax.db
+
+metric: eval_loss
+mode: minimize
+
+pruner:
+  _target_: optuna.pruners.MedianPruner
+  n_startup_trials: 3
+  n_warmup_steps: 2
+
+search_space:
+  # --- optimization -------------------------------------------------
+  learning_rate:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-5
+    high: 1.0e-3
+    log: true
+  weight_decay:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 1.0e-4
+    high: 0.1
+    log: true
+  warmup_ratio:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 0.0
+    high: 0.1
+  lr_scheduler:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [cosine, linear]
+  batch_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [64]
+  num_train_epochs:
+    _target_: optuna.trial.Trial.suggest_int
+    low: 3
+    high: 3
+
+  # --- Mamba2 architecture ------------------------------------------
+  d_model:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [256, 512]
+  num_hidden_layers:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [4, 8, 12, 16]
+  state_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [32, 64]
+  chunk_size:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [128, 256]
+  projection_lr_mult:
+    _target_: optuna.trial.Trial.suggest_float
+    low: 0.1
+    high: 10.0
+    log: true
+  projection_init:
+    _target_: optuna.trial.Trial.suggest_categorical
+    choices: [pca, xavier]
+
+# NOTE on chunk_size: it is searched here because the JAX backbone runs the
+# same chunked scan the PyTorch one does, so it remains a genuine
+# memory/throughput knob that trades intra-chunk work against the number of
+# inter-chunk recurrence steps. Had the backbone used a plain sequential scan
+# (as the port was originally sketched) this axis would have been a no-op and
+# had to be deleted — roughly half the architecture search budget spent on a
+# dimension with no effect. `test_chunk_size_is_not_vestigial` pins the
+# invariant that different chunk sizes give the same answer.

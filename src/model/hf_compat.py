@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import torch
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from huggingface_hub import try_to_load_from_cache
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    PreTrainedModel,
+    PreTrainedTokenizerBase,
+)
 
 # Dtype names as they appear in config (``model.dtype``), shared by
 # ``dfm_mimir`` and ``mimir_mamba2`` so the two model kinds can't drift on
@@ -11,27 +18,43 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 DTYPE_MAP = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
+def _is_cached_locally(model_id: str) -> bool:
+    """True when the model's config.json is present in the HF cache."""
+    if os.path.isdir(model_id):
+        return True
+    return isinstance(try_to_load_from_cache(model_id, "config.json"), str)
+
+
 def load_tokenizer(
     model_id: str, trust_remote_code: bool = True
 ) -> PreTrainedTokenizerBase:
-    """Load a tokenizer and make sure it has a pad token.
-
-    Both model kinds need this identically: the donor/base tokenizers here
-    have no pad token defined, and padding is required for batched training.
-    """
+    """Load a tokenizer and make sure it has a pad token."""
     tokenizer = AutoTokenizer.from_pretrained(
-        model_id, trust_remote_code=trust_remote_code
+        model_id,
+        trust_remote_code=trust_remote_code,
+        local_files_only=_is_cached_locally(model_id),
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
 
 
-# Every AutoTokenizer/AutoModelForCausalLM.from_pretrained() call re-checks
-# the Hub for cache freshness (HEAD requests) even when the model is fully
-# cached locally — each K-fold run reloads the model once per fold, so this
-# would otherwise print a burst of "HTTP Request: HEAD ..." lines per fold.
-# Harmless noise when the cache is warm; bump both loggers to WARNING/ERROR.
+def load_model(
+    model_id: str, trust_remote_code: bool = True, **kwargs
+) -> PreTrainedModel:
+    """Load a causal LM, skipping the Hub cache-freshness HEAD when warm. """
+    return AutoModelForCausalLM.from_pretrained(
+        model_id,
+        trust_remote_code=trust_remote_code,
+        local_files_only=_is_cached_locally(model_id),
+        **kwargs,
+    )
+
+
+# Cold-start ``from_pretrained`` still emits httpx/huggingface_hub INFO lines
+# for the initial fetch. Keep both loggers quiet so those don't clutter the
+# per-fold output; warm-cache loads via ``load_model`` / ``load_tokenizer``
+# skip the HEAD requests outright.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
 

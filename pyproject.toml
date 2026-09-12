@@ -9,22 +9,63 @@ description = "Autoregressive DFM-Mimir fine-tuning for normalized span extracti
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    # --- PyTorch training path (src/model, src/train.py, src/cv.py) ---------
     "torch>=2.13.0",
-    "transformers>=5.16.1",
-    "protobuf>=5.29.0",
+    "transformers>=5.17.0",
+    "huggingface-hub>=1.7.2",   # try_to_load_from_cache, in model/hf_compat.py
+    "accelerate>=1.14.0",       # transformers device_map for the donor load
+    "protobuf>=5.29.0",         # tokenizer backend
     "lightning>=2.6.5",
+
+    # --- JAX / Flax-NNX training path (src/model_jax, src/train_jax.py) -----
+    # Floors are the versions this path is tested against, not the oldest that
+    # might work. flax in particular: the code uses 0.12 NNX APIs
+    # (Variable.get_value(), nnx.List, nnx.to_flat_state, nnx.Optimizer(wrt=),
+    # and 0.12's rule that an attribute's data/static status is fixed on first
+    # assignment), so it does NOT run on 0.10/0.11.
+    "jax>=0.11.1",              # pulls a matching jaxlib; see the cuda/tpu extras
+    "flax>=0.12.9",
+    "optax>=0.2.8",             # optimiser chain in train_jax.build_optimizer
+    "orbax-checkpoint>=0.12.4", # CheckpointManager in train_jax
+    "ml-dtypes>=0.6.0",         # bfloat16 .npz round-trip in the donor converter
+
+    # --- Orchestration and config ------------------------------------------
     "optuna>=4.9.0",
     "hydra-core==1.4.0.dev8",
     "omegaconf==2.4.0.dev15",
     "pyyaml>=6.0.0",
-    "polars>=1.43.2",
-    "fastexcel>=0.21.0",
-    "numpy>=2.5.1",
-    "accelerate>=1.14.0",
     "wandb>=0.20.0",
-    "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git",
-    "mamba-ssm @ git+https://github.com/state-spaces/mamba.git",
+
+    # --- Data ---------------------------------------------------------------
+    "numpy>=2.5.1",
+    "polars>=1.43.2",
+    "fastexcel>=0.21.0",        # polars read_excel backend; not imported directly
+
+    # --- Hyperparameter analysis (notebook/, scripts/analyze_hparams.py) ----
+    "pandas>=3.0.5",
+    "scipy>=1.18.1",
+    "statsmodels>=0.15.0",
+    "matplotlib>=3.11.2",
+    "jupytext",
+    "ipykernel",
+    "nbclient",
 ]
+
+[project.optional-dependencies]
+# JAX accelerator wheels. The base `jax` dependency above installs the CPU
+# build, which is all the test suite and the toy SSM benchmarks need. GPU and
+# TPU need a different wheel of the *same* jax version, and no single pin can
+# cover all three — so they are extras rather than something resolved here:
+#
+#   CPU / Apple silicon :  uv sync
+#   NVIDIA GPU          :  uv sync --extra cuda
+#   TPU                 :  uv sync --extra tpu   (needs the libtpu index below)
+#
+# TPU wheels are not all on PyPI; add the release index when installing:
+#   uv pip install "jax[tpu]" \
+#       -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+cuda = ["jax[cuda12]>=0.11.1"]
+tpu = ["jax[tpu]>=0.11.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
@@ -34,16 +75,10 @@ allow-direct-references = true
 
 [dependency-groups]
 dev = [
+    "ipython>=9.17.1",
     "pytest>=9.1.1",
+    "pyflakes>=3.2.0",  # unused-import / undefined-name check over src, tests, scripts
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
-
-[tool.uv]
-no-build-isolation-package = ["mamba-ssm", "causal-conv1d"]
-
-# Add this section to provide torch during the build phase
-[tool.uv.extra-build-dependencies]
-mamba-ssm = ["torch"]
-causal-conv1d = ["torch"]

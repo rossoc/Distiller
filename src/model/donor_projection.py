@@ -51,9 +51,7 @@ from typing import Optional
 import torch
 from torch import nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
-
-from model import hf_compat  # noqa: F401  (imported for its side-effect patch)
+from model.hf_compat import load_model
 
 log = logging.getLogger(__name__)
 
@@ -114,7 +112,7 @@ def load_donor_tables(
         return _DONOR_CACHE[key]
 
     log.info("Loading donor tables from %s (once per process)", model_id)
-    donor = AutoModelForCausalLM.from_pretrained(
+    donor = load_model(
         model_id,
         trust_remote_code=trust_remote_code,
         dtype=dtype,
@@ -421,11 +419,6 @@ class ProjectedLMHead(nn.Module):
 
         self.scale: nn.Parameter | None = None
         if learn_scale:
-            # Target logits of order 1 for a unit-RMS hidden state: such a
-            # vector has norm sqrt(in_dim), so logits land around
-            # sqrt(in_dim) * rms(W_small). Without this the donor head's own
-            # scale puts the initial cross-entropy in the hundreds and the
-            # first few hundred steps go entirely into undoing that.
             rms = _projected_rms(donor, projection)
             denom = rms * math.sqrt(in_dim)
             self.scale = nn.Parameter(
@@ -437,20 +430,15 @@ class ProjectedLMHead(nn.Module):
         return self.proj.weight
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Up-project into donor space first, then reuse the donor head. The
-        # cast goes toward the donor's dtype, not away from it: casting a
-        # [B, T, d_donor] activation is free next to casting a
-        # [vocab_size, d_donor] table, and the donor dtype is the training
-        # dtype anyway.
         up = self.proj(hidden_states.to(self.proj.weight.dtype))
-        logits = F.linear(up.to(self.donor.dtype), self.donor)
+        logits = F.linear(up.to(self.donor.dtype), self.donor)  # type: ignore
         return logits if self.scale is None else logits * self.scale.to(logits.dtype)
 
     @torch.no_grad()
     def materialize_weight(self, dtype: torch.dtype = torch.float32) -> torch.Tensor:
         """The concrete ``[vocab_size, d_model]`` small head, ``W_donor @ Q``."""
         scale = 1.0 if self.scale is None else float(self.scale)
-        return _project_table(self.donor, self.proj.weight * scale, dtype)
+        return _project_table(self.donor, self.proj.weight * scale, dtype)  # type: ignore
 
     def extra_repr(self) -> str:
         return (

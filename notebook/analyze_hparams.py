@@ -1,0 +1,890 @@
+# ---
+# jupyter:
+#   jupytext:
+#     text_representation:
+#       extension: .py
+#       format_name: percent
+#       format_version: '1.3'
+#       jupytext_version: 1.19.5
+#   kernelspec:
+#     display_name: Distiller (.venv)
+#     language: python
+#     name: distiller
+#     path: /Users/carlorosso/Library/Jupyter/kernels/distiller
+# ---
+
+# %% [markdown]
+# ---
+# title: "Which hyperparameters actually move validation loss?"
+# subtitle: "A regression + co-dependency analysis of the `mamba2_rnn_search2` Optuna study"
+# date: today
+# format:
+#   html:
+#     toc: true
+#     toc-depth: 3
+#     toc-location: left
+#     code-fold: true
+#     code-summary: "Show code"
+#     code-tools: true
+#     fig-align: center
+#     embed-resources: true
+#     theme: cosmo
+# execute:
+#   warning: false
+# jupyter: distiller
+# ---
+#
+# ## What this does
+#
+# Loads the Optuna study's trial history straight from its SQLite storage, keeps only
+# `COMPLETE` trials, builds a design matrix from the searched hyperparameters, and asks
+# two questions:
+#
+# 1. **Which hyperparameters move `mean_val_loss`, and in which direction?**
+#    Answered with OLS (linear regression) coefficients, a regularised (ridge) fit, and
+#    per-parameter marginal screens — all visualised rather than dumped as text.
+# 2. **How co-dependent are the hyperparameters with each other?**
+#    Answered with correlation heatmaps, the eigen-spectrum of the design matrix, and
+#    variance inflation factors. This matters a lot: the more the columns of the design
+#    matrix are entangled, the less any individual coefficient can be trusted, no matter
+#    how good the overall fit looks.
+#
+# `PRUNED` trials were stopped early on a partial `mean_val_loss` and `RUNNING` trials have
+# no final value, so both are excluded — including them would bias the regression toward
+# whatever the pruner happened to kill.
+#
+# Log-scale hyperparameters (`learning_rate`, `weight_decay`, `projection_lr_mult` — see
+# `src/config/optuna/mamba2.yaml`) are log-transformed before fitting, since they were
+# searched multiplicatively while OLS assumes additive linear effects. Categorical
+# hyperparameters are one-hot encoded (first level dropped, absorbed into the intercept).
+# Hyperparameters with no variance across the surviving trials are dropped — OLS cannot
+# estimate an effect for something that never changed.
+#
+# ## Setup
+
+# %%
+from __future__ import annotations
+
+import warnings
+from pathlib import Path
+from typing import NamedTuple
+
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+import optuna
+import pandas as pd
+import statsmodels.api as sm
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+
+# Hyperparameters sampled on a log scale (suggest_float(..., log=True)) in
+# src/config/optuna/mamba2.yaml -- log-transform these before fitting.
+LOG_SCALE_PARAMS = {"learning_rate", "weight_decay", "projection_lr_mult"}
+
+# Hyperparameters sampled via suggest_categorical -- one-hot encode these rather
+# than treating their values as a linear numeric scale.
+CATEGORICAL_PARAMS = {
+    "lr_scheduler",
+    "projection_init",
+    "d_model",
+    "num_hidden_layers",
+    "state_size",
+    "chunk_size",
+}
+
+# The objective is minimised, so a positive coefficient means "raises loss" = worse.
+C_WORSE = "#c0392b"
+C_BETTER = "#1f77b4"
+C_NEUTRAL = "#95a5a6"
+C_ACCENT = "#8e44ad"
+
+mpl.rcParams.update({
+    "figure.dpi": 130,
+    "savefig.dpi": 130,
+    "savefig.bbox": "tight",
+    "font.size": 9,
+    "axes.titlesize": 11,
+    "axes.titleweight": "bold",
+    "axes.labelsize": 9,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": True,
+    "grid.alpha": 0.25,
+    "legend.frameon": False,
+    "figure.facecolor": "white",
+    "axes.facecolor": "white",
+})
+
+
+# %% [markdown]
+# `outputs/mamba.db` is at the repo root, but this document may be executed from the repo
+# root (as a plain script) or from `notebook/` (Quarto and Jupyter both default to the
+# document's own directory) — resolve the repo root by walking up to `pyproject.toml` so
+# the path works either way.
+
+# %%
+def find_repo_root(marker: str = "pyproject.toml") -> Path:
+    for parent in [Path.cwd(), *Path.cwd().parents]:
+        if (parent / marker).exists():
+            return parent
+    return Path.cwd()
+
+
+STUDY_NAME = "mamba2_rnn_search2"
+DB = find_repo_root() / "outputs" / "mamba.db"
+assert DB.exists(), f"No such DB: {DB}"
+
+# %% [markdown]
+# ## Load the study
+
+# %%
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+study = optuna.load_study(study_name=STUDY_NAME, storage=f"sqlite:///{DB}")
+
+trials = study.trials_dataframe()
+complete = (
+    trials[(trials["state"] == "COMPLETE") & np.isfinite(trials["value"])]
+    .reset_index(drop=True)
+    .copy()
+)
+
+print(f"study {STUDY_NAME!r}  ({DB})")
+print(f"{len(trials)} trials total")
+for state, count in trials["state"].value_counts().items():
+    print(f"  {state:<10} {count:>3d}")
+print(f"\n{len(complete)} COMPLETE trials with a finite value -> used below")
+assert len(complete) >= 3, f"Not enough COMPLETE trials to regress on ({len(complete)})"
+
+# %%
+#| label: fig-history
+#| fig-cap: "Search progress. Each dot is a COMPLETE trial; the step line is the running best. Vertical bands mark trials the MedianPruner killed early — they carry no usable final objective, which is why the regression sample is so much smaller than the trial count."
+fig, axes = plt.subplots(1, 2, figsize=(10, 3.6), width_ratios=[2.2, 1])
+
+ax = axes[0]
+order = complete.sort_values("number")
+pruned = trials[trials["state"] == "PRUNED"]
+ax.vlines(pruned["number"], 0, 1, transform=ax.get_xaxis_transform(),
+          color=C_NEUTRAL, alpha=0.18, lw=2.5, label=f"PRUNED (n={len(pruned)})")
+ax.step(order["number"], order["value"].cummin(), where="post",
+        color=C_BETTER, lw=1.8, label="running best")
+ax.plot(complete["number"], complete["value"], "o", color=C_ACCENT, ms=6,
+        mec="white", mew=0.8, label=f"COMPLETE (n={len(complete)})")
+ax.set_xlabel("trial number")
+ax.set_ylabel("mean_val_loss")
+ax.set_title("Optimisation history")
+ax.legend(loc="upper right", fontsize=8)
+
+ax = axes[1]
+ax.hist(complete["value"], bins=min(10, max(3, len(complete) // 2)),
+        color=C_ACCENT, alpha=0.75, edgecolor="white")
+ax.axvline(complete["value"].min(), color=C_BETTER, lw=1.6, label="best")
+ax.set_xlabel("mean_val_loss")
+ax.set_ylabel("trials")
+ax.set_title("Objective spread")
+ax.legend(fontsize=8)
+
+plt.tight_layout()
+
+# %% [markdown]
+# The spread in the right-hand panel is the signal budget: the regression can only explain
+# variation that exists. If every COMPLETE trial landed at nearly the same loss, no
+# hyperparameter can look important, however well-designed the model.
+
+# %%
+#| echo: false
+#| output: asis
+v = complete["value"].to_numpy()
+med = float(np.median(v))
+mad = float(np.median(np.abs(v - med)))
+scale = 1.4826 * mad if mad > 0 else float(v.std(ddof=0))
+robust_z = np.abs(v - med) / scale if scale > 0 else np.zeros_like(v)
+outliers = complete.loc[robust_z > 3.5, ["number", "value"]]
+
+if len(outliers):
+    listed = "; ".join(f"trial {int(r.number)} at {r.value:.4g}" for r in outliers.itertuples())
+    share = 1 - np.var(np.delete(v, outliers.index.to_numpy())) / np.var(v)
+    share_txt = ">99%" if share > 0.995 else f"{share:.0%}"
+    print(f"""::: {{.callout-warning}}
+## {len(outliers)} trial{"s" if len(outliers) > 1 else ""} dominate{"" if len(outliers) > 1 else "s"} the variance
+
+{listed} — against a median of {med:.4g} across all {len(v)} COMPLETE trials. Dropping
+{"them" if len(outliers) > 1 else "it"} removes **{share_txt} of the variance in the objective**.
+
+This matters more than it looks. Least squares minimises *squared* error, so a single
+diverged run outweighs all the well-behaved trials combined, and every fit below is
+largely explaining "which trial blew up" rather than "what makes a good model marginally
+better". The rank-based columns in the marginal screens are the outlier-resistant
+cross-check; if they disagree with the least-squares results, believe them.
+:::""")
+
+
+# %% [markdown]
+# ## Build the design matrix
+
+# %%
+class Prepared(NamedTuple):
+    X: pd.DataFrame        # encoded design matrix: standardised continuous + dummies
+    P: pd.DataFrame        # per-parameter transformed values (log applied, not encoded)
+    continuous: list[str]  # original names treated as continuous
+    categorical: list[str] # original names treated as categorical
+    logged: list[str]      # original names that were log-transformed
+    dropped: list[str]     # original names dropped for having no variance
+
+
+def prepare(df: pd.DataFrame) -> Prepared:
+    """Turn the raw params_* columns of a trials dataframe into a numeric, encoded
+    design matrix ready for OLS, keeping the intermediate per-parameter values around
+    so we can also plot marginal effects on the parameters' own scales."""
+    param_cols = [c for c in df.columns if c.startswith("params_")]
+    P = df[param_cols].rename(columns=lambda c: c.removeprefix("params_")).copy()
+
+    logged = sorted(LOG_SCALE_PARAMS & set(P.columns))
+    for name in logged:
+        P[name] = np.log(P[name])
+
+    categorical = [c for c in P.columns if c in CATEGORICAL_PARAMS]
+    continuous = [c for c in P.columns if c not in CATEGORICAL_PARAMS]
+
+    # Drop zero-variance columns (a param fixed for this study) -- OLS can't estimate
+    # an effect with no variation, and standardising would divide by zero.
+    dropped = [c for c in P.columns if P[c].nunique() <= 1]
+    P = P.drop(columns=dropped)
+    categorical = [c for c in categorical if c not in dropped]
+    continuous = [c for c in continuous if c not in dropped]
+    logged = [c for c in logged if c not in dropped]
+
+    # Standardise continuous columns so coefficients are comparable in magnitude
+    # across hyperparameters with very different natural scales.
+    X = P.copy()
+    for name in continuous:
+        X[name] = (X[name] - X[name].mean()) / X[name].std()
+    if categorical:
+        X = pd.get_dummies(X, columns=categorical, drop_first=True)
+
+    return Prepared(X.astype(float), P, continuous, categorical, logged, dropped)
+
+
+prep = prepare(complete)
+X, P = prep.X, prep.P
+y = complete["value"].rename("mean_val_loss")
+n, p = X.shape
+
+print(f"continuous  : {', '.join(prep.continuous) or '-'}")
+print(f"  log-scaled: {', '.join(prep.logged) or '-'}")
+print(f"categorical : {', '.join(prep.categorical) or '-'}")
+print(f"dropped     : {', '.join(prep.dropped) or '-'}  (no variance across COMPLETE trials)")
+print(f"\ndesign matrix: n = {n} trials x p = {p} encoded features (+ intercept)")
+print(f"OLS residual degrees of freedom: n - p - 1 = {n - p - 1}")
+
+# %%
+#| echo: false
+#| output: asis
+if n - p - 1 <= 0:
+    print(f"""::: {{.callout-important}}
+## The full OLS model is saturated
+
+With **{n} usable trials** and **{p} encoded features** there are
+`{n} - {p} - 1 = {n - p - 1}` residual degrees of freedom. The linear system is
+under-determined: infinitely many coefficient vectors fit these points exactly, so OLS
+returns R² = 1, standard errors of 0 or `inf`, and undefined (`NaN`) p-values. The fit
+below is reported for completeness, but **its individual coefficients are not
+identified** — read the ridge fit and the marginal screens instead, and treat the
+co-dependency section as the explanation of *why*.
+
+The cheapest fix is more `COMPLETE` trials: roughly {max(0, p + 11 - n)} more would give
+~10 residual degrees of freedom. Relaxing the pruner (`n_warmup_steps` in
+`src/config/optuna/mamba2.yaml`) is the fastest way to get them, since
+{len(trials[trials['state'] == 'PRUNED'])} trials were pruned.
+:::""")
+else:
+    print(f"""::: {{.callout-note}}
+## Degrees of freedom
+
+{n} usable trials and {p} encoded features leave `{n - p - 1}` residual degrees of
+freedom. The OLS coefficients below are identified, but with a sample this small the
+confidence intervals will still be wide.
+:::""")
+
+# %%
+X
+
+
+# %% [markdown]
+# ## Co-dependency between hyperparameters
+#
+# Optuna's TPE sampler is *adaptive*: it concentrates later trials in regions that looked
+# promising earlier. That is exactly what you want from an optimiser, and exactly what you
+# do not want from a regression design — it induces correlation between hyperparameters
+# that a randomised grid would not have. Combined with a small sample, that correlation is
+# what makes individual coefficients unstable, so it is worth measuring directly.
+#
+# ### Pairwise correlation
+#
+# Pearson `r` captures linear co-movement; Spearman `ρ` captures any monotone relationship
+# and is less sensitive to the one or two extreme trials that a 9-point sample can easily
+# contain. For the one-hot columns, `r` between two dummies is just a rescaled
+# count of how often the two levels co-occur.
+
+# %%
+#| label: fig-corr
+#| fig-cap: "Correlation between encoded design-matrix columns. Off-diagonal cells far from zero mean the two hyperparameters were not explored independently, so the regression cannot cleanly separate their effects."
+def heatmap(ax, M: pd.DataFrame, title: str) -> None:
+    im = ax.imshow(M.to_numpy(), cmap="RdBu_r", vmin=-1, vmax=1)
+    ax.set_xticks(range(M.shape[1]), M.columns, rotation=90, fontsize=7)
+    ax.set_yticks(range(M.shape[0]), M.index, fontsize=7)
+    ax.set_title(title)
+    ax.grid(False)
+    if M.shape[0] <= 16:
+        for i in range(M.shape[0]):
+            for j in range(M.shape[1]):
+                v = M.to_numpy()[i, j]
+                if np.isfinite(v):
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", fontsize=5.5,
+                            color="white" if abs(v) > 0.62 else "#222222")
+    return im
+
+
+pearson = X.corr()
+spearman = X.corr(method="spearman")
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 5.2))
+heatmap(axes[0], pearson, "Pearson r (linear)")
+im = heatmap(axes[1], spearman, "Spearman ρ (monotone)")
+fig.colorbar(im, ax=axes, shrink=0.72, pad=0.02, label="correlation")
+
+# %%
+#| label: tbl-pairs
+#| tbl-cap: "The ten most entangled pairs of encoded features."
+iu = np.triu_indices_from(pearson.to_numpy(), k=1)
+pairs = pd.DataFrame({
+    "feature A": pearson.index.to_numpy()[iu[0]],
+    "feature B": pearson.columns.to_numpy()[iu[1]],
+    "pearson r": pearson.to_numpy()[iu],
+    "spearman ρ": spearman.to_numpy()[iu],
+})
+pairs["|r|"] = pairs["pearson r"].abs()
+pairs = pairs.sort_values("|r|", ascending=False).drop(columns="|r|").reset_index(drop=True)
+pairs.head(10).round(3)
+
+# %%
+#| label: fig-maxcorr
+#| fig-cap: "For each feature, the strongest absolute correlation it has with any other feature. Bars near 1.0 mark features that are near-duplicates of some other column — their individual coefficients are essentially arbitrary."
+off_diag = pearson.where(~np.eye(p, dtype=bool))
+max_abs = off_diag.abs().max().sort_values()
+
+fig, ax = plt.subplots(figsize=(8, 0.34 * p + 1.4))
+colors = [C_WORSE if v > 0.8 else (C_ACCENT if v > 0.5 else C_NEUTRAL) for v in max_abs]
+ax.barh(range(p), max_abs.to_numpy(), color=colors, alpha=0.9)
+ax.set_yticks(range(p), max_abs.index, fontsize=8)
+ax.axvline(0.8, color=C_WORSE, ls="--", lw=1, label="0.8 — severe")
+ax.axvline(0.5, color=C_ACCENT, ls=":", lw=1, label="0.5 — moderate")
+ax.set_xlim(0, 1)
+ax.set_xlabel("max |r| with any other feature")
+ax.set_title("How redundant is each feature?")
+ax.legend(loc="lower right", fontsize=8)
+plt.tight_layout()
+
+# %% [markdown]
+# ### How many independent directions did the search actually explore?
+#
+# Pairwise correlation only sees two columns at a time. A feature can be perfectly
+# predictable from a *combination* of others while correlating weakly with each one
+# individually. The eigenvalues of the correlation matrix catch that: each near-zero
+# eigenvalue is one exact linear dependency among the columns.
+
+# %%
+#| label: fig-eigen
+#| fig-cap: "Eigen-spectrum of the feature correlation matrix. Eigenvalues at zero are directions in hyperparameter space that the completed trials never varied independently — each one is a dimension along which the coefficients are unidentifiable."
+eig = np.clip(np.sort(np.linalg.eigvalsh(pearson.to_numpy()))[::-1], 0, None)
+eff_rank = int((eig > 1e-8).sum())
+cum = np.cumsum(eig) / eig.sum()
+
+fig, ax = plt.subplots(figsize=(8.5, 3.8))
+bars = ax.bar(range(1, p + 1), eig,
+              color=[C_ACCENT if e > 1e-8 else C_WORSE for e in eig], alpha=0.85)
+ax.axhline(1.0, color=C_NEUTRAL, ls=":", lw=1)
+ax.set_xlabel("principal component")
+ax.set_ylabel("eigenvalue")
+ax.set_title(f"Effective rank: {eff_rank} of {p} features")
+ax.set_xticks(range(1, p + 1))
+
+ax2 = ax.twinx()
+ax2.plot(range(1, p + 1), cum, "o-", color=C_BETTER, ms=4, lw=1.4)
+ax2.set_ylabel("cumulative variance explained", color=C_BETTER)
+ax2.tick_params(axis="y", colors=C_BETTER)
+ax2.set_ylim(0, 1.05)
+ax2.grid(False)
+plt.tight_layout()
+
+# %%
+nonzero = eig[eig > 1e-8]
+cond = np.sqrt(eig[0] / nonzero[-1]) if len(nonzero) else np.inf
+print(f"effective rank      : {eff_rank} / {p}")
+print(f"condition index     : {cond:,.1f}" + ("   (>30 signals serious collinearity)" if np.isfinite(cond) else ""))
+print(f"PCs for 90% variance: {int(np.searchsorted(cum, 0.90) + 1)}")
+if eff_rank < p:
+    print(f"\n{p - eff_rank} exact linear dependencies among the {p} features -- "
+          "unavoidable whenever n <= p, since n points span at most n-1 centred dimensions.")
+
+
+# %% [markdown]
+# ### Variance inflation factors
+#
+# VIF for feature *j* is `1 / (1 - R²_j)`, where `R²_j` comes from regressing feature *j*
+# on all the others. It is the factor by which co-dependency inflates that coefficient's
+# variance: VIF > 5 is usually called problematic, VIF > 10 severe.
+
+# %%
+#| label: tbl-vif
+#| tbl-cap: "Variance inflation factors. `R² on others` is the share of each feature that the remaining features already explain."
+def vif_table(X: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    exog = sm.add_constant(X.to_numpy(), has_constant="add")
+    for i, name in enumerate(X.columns):
+        others = np.delete(exog, i + 1, axis=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r2 = sm.OLS(X.iloc[:, i].to_numpy(), others).fit().rsquared
+        r2 = float(np.clip(r2, 0.0, 1.0)) if np.isfinite(r2) else 1.0
+        rows.append({"feature": name, "R² on others": r2,
+                     "VIF": np.inf if r2 > 1 - 1e-10 else 1.0 / (1.0 - r2)})
+    return pd.DataFrame(rows).sort_values("R² on others", ascending=False).reset_index(drop=True)
+
+
+vif = vif_table(X)
+vif.round(3)
+
+# %%
+#| echo: false
+#| output: asis
+n_inf = int(np.isinf(vif["VIF"]).sum())
+if n_inf == len(vif):
+    print(f"""::: {{.callout-warning}}
+Every VIF is infinite. This is not a property of these particular hyperparameters — it
+is arithmetic: with {n} trials and {p} features, any one feature can always be written
+exactly as a combination of the others, so `R²_j = 1` for every *j*. VIF only becomes
+informative once `n` comfortably exceeds `p`. Until then, the pairwise correlations and
+the eigen-spectrum above are the usable co-dependency diagnostics.
+:::""")
+elif n_inf:
+    print(f"""::: {{.callout-warning}}
+{n_inf} of {len(vif)} features have infinite VIF — they are exact linear combinations of
+the others and their coefficients are not separately identifiable.
+:::""")
+
+# %% [markdown]
+# ## OLS fit
+
+# %%
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    np.seterr(divide="ignore", invalid="ignore")
+    ols = sm.OLS(y, sm.add_constant(X)).fit()
+print(ols.summary())
+
+# %% [markdown]
+# ### Coefficients, visualised
+#
+# Each coefficient is the change in `mean_val_loss` for a one-standard-deviation increase
+# in that hyperparameter (continuous features, on their log scale where applicable), or for
+# switching to that level from the dropped reference level (dummy features). Because the
+# objective is minimised, **bars to the right are worse and bars to the left are better**.
+
+# %%
+#| label: fig-coef
+#| fig-cap: "OLS coefficients with 95% confidence intervals, sorted by magnitude. Filled markers are significant at p < 0.05; intervals are omitted where the saturated fit leaves them undefined."
+coef = ols.params.drop("const")
+try:
+    ci = ols.conf_int().drop("const")
+    ci.columns = ["lo", "hi"]
+except Exception:
+    ci = pd.DataFrame({"lo": np.nan, "hi": np.nan}, index=coef.index)
+pv = ols.pvalues.drop("const")
+
+order = coef.abs().sort_values().index
+coef, ci, pv = coef[order], ci.loc[order], pv[order]
+sig = (pv < 0.05).fillna(False)
+
+fig, ax = plt.subplots(figsize=(8.5, 0.36 * len(coef) + 1.6))
+pos = np.arange(len(coef))
+for i, name in enumerate(coef.index):
+    c = C_WORSE if coef[name] > 0 else C_BETTER
+    lo, hi = ci.loc[name, "lo"], ci.loc[name, "hi"]
+    if np.isfinite(lo) and np.isfinite(hi):
+        ax.plot([lo, hi], [i, i], color=c, lw=1.6, alpha=0.55, solid_capstyle="round")
+    ax.plot(coef[name], i, "o", ms=7, color=c,
+            mfc=c if sig[name] else "white", mew=1.6)
+
+ax.axvline(0, color="#333333", lw=1)
+ax.set_yticks(pos, [f"{'* ' if sig[n] else ''}{n}" for n in coef.index], fontsize=8)
+ax.set_xlabel("Δ mean_val_loss   (← better · worse →)")
+ax.set_title("OLS coefficients" + ("  —  saturated fit, not identified" if n - p - 1 <= 0 else ""))
+if not np.isfinite(ci.to_numpy()).any():
+    ax.text(0.99, 0.02, "no confidence intervals: 0 residual d.o.f.",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color=C_WORSE)
+plt.tight_layout()
+
+# %% [markdown]
+# ## Ridge: a fit that stays defined when `n ≤ p`
+#
+# Ridge regression adds an `α‖β‖²` penalty, which makes the coefficients unique even when
+# OLS is saturated, and spreads weight across correlated features instead of letting them
+# cancel each other with huge opposing values. `α` is chosen by leave-one-out
+# cross-validation.
+#
+# All features are re-standardised for this fit (including the dummies) so the penalty
+# treats them on equal footing and the coefficients are directly comparable.
+#
+# ::: {.callout-note collapse="true"}
+# ## Why the cross-validation is refit from scratch rather than read off the hat matrix
+#
+# The textbook shortcut `e₍₋ᵢ₎ = eᵢ / (1 − hᵢᵢ)` recovers leave-one-out residuals from a
+# single fit, and it is exact for ridge — but it is badly misleading when `n ≤ p`.
+# Standardising the columns centres them, so the design matrix spans the same
+# `n − 1` dimensions that centred `y` lives in; at small `α` the model interpolates the
+# training points, the residuals go to zero, and the shortcut duly reports an LOOCV R² of
+# `1.000`. That number measures interpolation, not prediction. With `n` this small an
+# exact refit for every held-out trial costs microseconds, so the honest version is used
+# here — including recomputing the standardisation inside each fold, so no information
+# about the held-out trial leaks into its own prediction.
+# :::
+
+# %%
+keep = X.columns[X.std(ddof=0).to_numpy() > 0]
+Xa = X[keep].to_numpy()
+yv = y.to_numpy()
+alphas = np.logspace(-2, 4, 61)
+
+
+def ridge_fit(X_train: np.ndarray, y_train: np.ndarray, alpha: float):
+    """Standardise on the training rows only, then solve the penalised normal equations.
+    Returns the coefficients and a predictor that applies the training transform."""
+    mu, sd = X_train.mean(0), X_train.std(0)
+    sd = np.where(sd > 0, sd, 1.0)
+    Z = (X_train - mu) / sd
+    y_mean = y_train.mean()
+    beta = np.linalg.solve(Z.T @ Z + alpha * np.eye(Z.shape[1]), Z.T @ (y_train - y_mean))
+    return beta, lambda X_new: y_mean + ((X_new - mu) / sd) @ beta
+
+
+def loo_predictions(alpha: float) -> np.ndarray:
+    """Exact leave-one-out: refit on the other n-1 trials, predict the held-out one."""
+    preds = np.empty(len(yv))
+    for i in range(len(yv)):
+        mask = np.ones(len(yv), dtype=bool)
+        mask[i] = False
+        _, predict = ridge_fit(Xa[mask], yv[mask], alpha)
+        preds[i] = predict(Xa[i : i + 1])[0]
+    return preds
+
+
+loo_mse = np.array([np.mean((yv - loo_predictions(a)) ** 2) for a in alphas])
+best_i = int(np.argmin(loo_mse))
+best_alpha = float(alphas[best_i])
+
+y_loo = loo_predictions(best_alpha)
+loo_resid_best = yv - y_loo
+sst = float(np.var(yv))
+r2_loo = 1.0 - loo_mse[best_i] / sst
+
+# Full-data fit at the selected penalty, plus the whole path for the plot below.
+beta_best, _ = ridge_fit(Xa, yv, best_alpha)
+ridge_coef = pd.Series(beta_best, index=keep)
+path = np.array([ridge_fit(Xa, yv, a)[0] for a in alphas])
+
+print(f"best alpha (LOOCV) : {best_alpha:.4g}")
+print(f"LOOCV R²           : {r2_loo:.3f}")
+print(f"LOOCV RMSE         : {np.sqrt(loo_mse[best_i]):.4f}")
+print(f"baseline RMSE      : {np.sqrt(sst):.4f}   (predicting the mean of y every time)")
+print(f"best LOOCV R² over the whole alpha grid: {1 - loo_mse.min() / sst:.3f}")
+
+# %%
+#| label: fig-ridge-path
+#| fig-cap: "Left: leave-one-out error against penalty strength; the dashed line is the selected α. Right: how each coefficient shrinks as the penalty grows. Coefficients that hold their sign and magnitude across a wide range of α are the robust ones; those that swing wildly at small α are being propped up by collinearity."
+fig, axes = plt.subplots(1, 2, figsize=(11, 4), width_ratios=[1, 1.5])
+
+ax = axes[0]
+ax.plot(alphas, loo_mse, color=C_ACCENT, lw=1.8)
+ax.axvline(best_alpha, color=C_BETTER, ls="--", lw=1.4, label=f"α = {best_alpha:.3g}")
+ax.axhline(sst, color=C_NEUTRAL, ls=":", lw=1.2, label="mean-only baseline")
+ax.set_xscale("log")
+ax.set_xlabel("α (ridge penalty)")
+ax.set_ylabel("LOOCV mean squared error")
+ax.set_title("Penalty selection")
+ax.legend(fontsize=8)
+
+ax = axes[1]
+cmap = plt.get_cmap("tab20")
+for j, name in enumerate(keep):
+    ax.plot(alphas, path[:, j], lw=1.5, color=cmap(j % 20), label=name)
+ax.axvline(best_alpha, color="#333333", ls="--", lw=1.2)
+ax.axhline(0, color="#333333", lw=0.8)
+ax.set_xscale("log")
+ax.set_xlabel("α (ridge penalty)")
+ax.set_ylabel("standardised coefficient")
+ax.set_title("Ridge path")
+ax.legend(fontsize=6.5, ncol=2, loc="best")
+plt.tight_layout()
+
+# %%
+#| label: fig-ridge-coef
+#| fig-cap: "Ridge coefficients at the cross-validated α. These are the most trustworthy per-feature effect estimates available at this sample size — but they are biased toward zero by design, so read them as a ranking rather than as calibrated effect sizes."
+rc = ridge_coef.reindex(ridge_coef.abs().sort_values().index)
+
+fig, ax = plt.subplots(figsize=(8.5, 0.36 * len(rc) + 1.6))
+ax.barh(range(len(rc)), rc.to_numpy(),
+        color=[C_WORSE if v > 0 else C_BETTER for v in rc], alpha=0.9)
+ax.axvline(0, color="#333333", lw=1)
+ax.set_yticks(range(len(rc)), rc.index, fontsize=8)
+ax.set_xlabel("standardised ridge coefficient   (← better · worse →)")
+ax.set_title(f"Ridge coefficients at α = {best_alpha:.3g}")
+plt.tight_layout()
+
+# %%
+#| label: fig-loo
+#| fig-cap: "Honest out-of-sample check: each trial's objective predicted by a ridge model that never saw that trial. Points on the dashed line are perfect predictions."
+fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+
+ax = axes[0]
+lims = [min(y.min(), y_loo.min()), max(y.max(), y_loo.max())]
+pad = 0.05 * (lims[1] - lims[0] or 1)
+ax.plot(lims, lims, "--", color=C_NEUTRAL, lw=1.2)
+ax.axhline(y.mean(), color=C_NEUTRAL, ls=":", lw=1, label="mean-only baseline")
+ax.scatter(y, y_loo, s=55, color=C_ACCENT, alpha=0.85, edgecolor="white", zorder=3)
+ax.set_xlim(lims[0] - pad, lims[1] + pad)
+ax.set_xlabel("actual mean_val_loss")
+ax.set_ylabel("LOO-predicted mean_val_loss")
+ax.set_title(f"Leave-one-out predictions (R² = {r2_loo:.3f})")
+ax.legend(fontsize=8)
+
+ax = axes[1]
+ax.axhline(0, color="#333333", lw=1)
+ax.scatter(y_loo, loo_resid_best, s=55, color=C_ACCENT, alpha=0.85,
+           edgecolor="white", zorder=3)
+ax.set_xlabel("LOO-predicted mean_val_loss")
+ax.set_ylabel("LOO residual")
+ax.set_title("Residuals")
+plt.tight_layout()
+
+# %%
+#| echo: false
+#| output: asis
+if r2_loo <= 0:
+    print(f"""::: {{.callout-important}}
+## Negative LOOCV R² ({r2_loo:.3f})
+
+The model predicts held-out trials **worse than simply guessing the mean** of the other
+trials. With {n} trials, {p} features and the collinearity measured above, there is not
+yet enough signal to support *any* claim about which hyperparameters matter — including
+the rankings plotted above. Everything in this document is descriptive until this number
+turns positive.
+:::""")
+else:
+    print(f"""::: {{.callout-note}}
+## LOOCV R² = {r2_loo:.3f}
+
+The ridge model beats the mean-only baseline on held-out trials, so the coefficient
+ranking above carries real signal. It is still estimated from {n} trials, so treat it as
+a prioritisation for the next search round rather than a settled conclusion.
+:::""")
+
+# %% [markdown]
+# ## Marginal screens, one hyperparameter at a time
+#
+# The fits above ask "what does this hyperparameter do *holding the others fixed*" — the
+# question co-dependency makes hard to answer. A marginal screen asks the easier question:
+# "does this hyperparameter alone track the objective at all?" Each test uses a single
+# parameter, so it is well-posed even at this sample size. The cost is confounding: an
+# apparent effect may belong to a correlated parameter instead. p-values are adjusted
+# across parameters with Benjamini–Hochberg FDR.
+#
+# Each parameter gets two tests. The least-squares column (`p`) is the usual one. The rank
+# column (`p (rank)`) — Spearman for continuous parameters, Kruskal–Wallis for categorical
+# ones — depends only on the ordering of the trials, so a single diverged run cannot drive
+# it. Given the outlier flagged earlier, the rank column is the one to trust.
+
+# %%
+#| label: tbl-marginal
+#| tbl-cap: "Per-parameter screens. `effect` is the per-standard-deviation slope for continuous parameters and the spread between best and worst group mean for categorical ones; negative means lower loss. `p` is least-squares, `p (rank)` is the outlier-resistant equivalent, `p (BH)` is `p` after Benjamini-Hochberg FDR correction."
+rows = []
+for name in prep.continuous + prep.categorical:
+    if name in prep.categorical:
+        Xu = pd.get_dummies(P[name], drop_first=True).astype(float)
+        means = y.groupby(P[name].to_numpy()).mean()
+        counts = P[name].value_counts()
+        effect = float(means.max() - means.min())
+        # Show the per-level trial count: a level seen once cannot be told apart from
+        # whatever else was special about that single trial.
+        detail = ", ".join(f"{lvl}={m:.4f} (n={counts[lvl]})"
+                           for lvl, m in means.sort_values().items())
+        groups = [y[P[name] == lvl].to_numpy() for lvl in P[name].unique()]
+        try:
+            rank_p = float(stats.kruskal(*groups).pvalue)
+        except ValueError:
+            rank_p = np.nan
+    else:
+        Xu = ((P[name] - P[name].mean()) / P[name].std()).to_frame()
+        span = f"{P[name].min():.3g}..{P[name].max():.3g}"
+        detail = f"log-scaled, {span}" if name in prep.logged else span
+        rank_p = float(stats.spearmanr(P[name], y).pvalue)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        m = sm.OLS(y, sm.add_constant(Xu)).fit()
+    if name not in prep.categorical:
+        effect = float(m.params.iloc[1])
+    rows.append({"parameter": name,
+                 "kind": "categorical" if name in prep.categorical else "continuous",
+                 "effect": effect, "R²": m.rsquared, "p": m.f_pvalue,
+                 "p (rank)": rank_p, "detail": detail})
+
+marginal = pd.DataFrame(rows)
+ok = np.isfinite(marginal["p"])
+marginal["p (BH)"] = np.nan
+if ok.any():
+    marginal.loc[ok, "p (BH)"] = multipletests(marginal.loc[ok, "p"], method="fdr_bh")[1]
+marginal = marginal.sort_values("p").reset_index(drop=True)
+marginal[["parameter", "kind", "effect", "R²", "p", "p (rank)", "p (BH)", "detail"]].round(4)
+
+# %%
+#| echo: false
+#| output: asis
+ls_only = marginal[(marginal["p"] < 0.05) & (marginal["p (rank)"] > 0.10)]["parameter"].tolist()
+rank_only = marginal[(marginal["p"] > 0.10) & (marginal["p (rank)"] < 0.05)]["parameter"].tolist()
+thin = [r.parameter for r in marginal.itertuples()
+        if r.kind == "categorical" and "(n=1)" in r.detail]
+
+notes = []
+if ls_only:
+    notes.append(
+        "- " + ", ".join(f"`{c}`" for c in ls_only) + " look{} decisive by least squares "
+        "but not by rank — the apparent effect rests on the outlying trial rather than on a "
+        "consistent trend.".format("s" if len(ls_only) == 1 else ""))
+if rank_only:
+    notes.append(
+        "- " + ", ".join(f"`{c}`" for c in rank_only) + " show{} the opposite pattern: "
+        "no least-squares signal, but a consistent ordering across trials. Squared error is "
+        "busy explaining the diverged run, so the steady effect gets swamped. These are the "
+        "more plausible real effects.".format("s" if len(rank_only) == 1 else ""))
+if thin:
+    notes.append(
+        "- " + ", ".join(f"`{c}`" for c in thin) + " {} a level observed in only one trial. "
+        "Its effect is perfectly confounded with everything else that was unique to that "
+        "trial and cannot be estimated separately.".format(
+            "has" if len(thin) == 1 else "have"))
+
+if notes:
+    print("::: {.callout-tip}\n## Where the two tests disagree\n\n"
+          + "\n".join(notes) + "\n:::")
+
+# %%
+#| label: fig-marginal
+#| fig-cap: "Every non-constant hyperparameter against the objective. Continuous parameters show the simple least-squares line; categorical ones show per-level trial values with the group mean as a bar. Lower is better throughout."
+names = prep.continuous + prep.categorical
+ncol = 3
+nrow = int(np.ceil(len(names) / ncol))
+fig, axes = plt.subplots(nrow, ncol, figsize=(11, 2.9 * nrow), squeeze=False)
+pv_by_name = marginal.set_index("parameter")["p"]
+
+for ax, name in zip(axes.ravel(), names):
+    pval = pv_by_name.get(name, np.nan)
+    strong = np.isfinite(pval) and pval < 0.05
+    if name in prep.categorical:
+        levels = sorted(P[name].unique())
+        for i, lvl in enumerate(levels):
+            vals = y[P[name] == lvl].to_numpy()
+            jitter = np.random.default_rng(0).normal(0, 0.045, len(vals))
+            ax.plot(np.full(len(vals), i) + jitter, vals, "o", ms=6,
+                    color=C_ACCENT, alpha=0.8, mec="white", mew=0.7)
+            ax.hlines(vals.mean(), i - 0.24, i + 0.24, color=C_BETTER, lw=2.2)
+        ax.set_xticks(range(len(levels)), [str(v) for v in levels], fontsize=8)
+        ax.set_xlim(-0.5, len(levels) - 0.5)
+        ax.set_xlabel(name)
+    else:
+        xv = P[name].to_numpy()
+        ax.plot(xv, y, "o", ms=6, color=C_ACCENT, alpha=0.8, mec="white", mew=0.7)
+        if len(np.unique(xv)) > 1:
+            b1, b0 = np.polyfit(xv, y.to_numpy(), 1)
+            xs = np.linspace(xv.min(), xv.max(), 50)
+            ax.plot(xs, b0 + b1 * xs, "-", lw=1.8,
+                    color=C_WORSE if b1 > 0 else C_BETTER)
+        ax.set_xlabel(f"log({name})" if name in prep.logged else name)
+    ax.set_ylabel("mean_val_loss")
+    ax.set_title(f"{name}{'  *' if strong else ''}   (p = {pval:.3f})" if np.isfinite(pval) else name,
+                 fontsize=9.5)
+
+for ax in axes.ravel()[len(names):]:
+    ax.axis("off")
+plt.tight_layout()
+
+# %% [markdown]
+# ## Cross-check: Optuna's own importance estimate
+#
+# Optuna scores importance with a tree-based, non-linear evaluator over the same completed
+# trials. It can pick up interactions and thresholds that a linear model cannot, so
+# agreement with the ridge ranking is reassuring and disagreement usually points at a
+# non-linear effect.
+
+# %%
+#| label: fig-optuna-importance
+#| fig-cap: "Optuna's built-in hyperparameter importance, computed on the same COMPLETE trials. These are non-negative shares that sum to 1 — they say *how much* a parameter matters, not in which direction."
+try:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        imp = pd.Series(optuna.importance.get_param_importances(study)).sort_values()
+    fig, ax = plt.subplots(figsize=(8.5, 0.36 * len(imp) + 1.4))
+    ax.barh(range(len(imp)), imp.to_numpy(), color=C_ACCENT, alpha=0.9)
+    ax.set_yticks(range(len(imp)), imp.index, fontsize=8)
+    ax.set_xlabel("relative importance")
+    ax.set_title("Optuna param importances")
+    for i, v in enumerate(imp.to_numpy()):
+        ax.text(v, i, f" {v:.3f}", va="center", fontsize=7.5)
+    plt.tight_layout()
+except Exception as exc:
+    print(f"Optuna importance evaluation unavailable: {type(exc).__name__}: {exc}")
+
+# %% [markdown]
+# ## Verdict
+
+# %%
+#| echo: false
+#| output: asis
+top_ridge = ridge_coef.reindex(ridge_coef.abs().sort_values(ascending=False).index).head(3)
+worst_pair = pairs.iloc[0]
+survivors = marginal[np.isfinite(marginal["p (BH)"]) & (marginal["p (BH)"] < 0.05)]
+rank_survivors = marginal[np.isfinite(marginal["p (rank)"]) & (marginal["p (rank)"] < 0.05)]
+
+lines = [
+    f"- **Sample:** {len(trials)} trials run, **{n} usable** "
+    f"({len(trials[trials['state'] == 'PRUNED'])} pruned, "
+    f"{len(trials[trials['state'] == 'RUNNING'])} still running) against {p} encoded features.",
+    f"- **Identifiability:** OLS has {n - p - 1} residual degrees of freedom; the design "
+    f"matrix has effective rank {eff_rank}/{p}.",
+    f"- **Strongest co-dependency:** `{worst_pair['feature A']}` ↔ `{worst_pair['feature B']}` "
+    f"at r = {worst_pair['pearson r']:+.2f}.",
+    f"- **Predictive signal:** ridge LOOCV R² = {r2_loo:.3f} "
+    f"({'beats' if r2_loo > 0 else 'does not beat'} the mean-only baseline).",
+    "- **Largest ridge effects:** " + ", ".join(
+        f"`{k}` ({v:+.4f})" for k, v in top_ridge.items()) + ".",
+    f"- **Marginal screens surviving FDR < 0.05:** "
+    + (", ".join(f"`{r}`" for r in survivors["parameter"]) if len(survivors) else "none."),
+    f"- **Outlier-resistant rank screens with p < 0.05:** "
+    + (", ".join(f"`{r}`" for r in rank_survivors["parameter"]) if len(rank_survivors) else "none."),
+]
+print("\n".join(lines))
+
+# %% [markdown]
+# ### How to read all of this
+#
+# The three fits answer progressively weaker but progressively more reliable questions.
+# OLS gives unbiased partial effects but needs `n` well above `p`. Ridge stays defined
+# under collinearity and small samples, at the price of shrinking effects toward zero, so
+# its coefficients rank rather than measure. The marginal screens are always estimable but
+# ignore confounding entirely. When all three agree on a parameter, that is a real finding;
+# when only one does, it is a hypothesis for the next search round.
+#
+# The single most effective way to sharpen every number above is more `COMPLETE` trials —
+# not more hyperparameters. The search currently spends most of its budget on trials the
+# pruner kills, which produce no usable objective value; raising `n_warmup_steps` on the
+# `MedianPruner` in `src/config/optuna/mamba2.yaml` trades wall-clock time for the
+# statistical power this analysis is short of.

@@ -1,0 +1,35 @@
+# Hydra root config for the JAX/Flax path (src/train_jax.py, cv_jax.py,
+# optuna_search_jax.py). The PyTorch entrypoints keep using config.yaml.
+#
+# Two root configs rather than one, because config.yaml's `trainer:` block is
+# a `_target_: lightning.pytorch.Trainer` instantiation — not a config group
+# that could simply be swapped out. (There is no src/config/trainer/ directory;
+# the block is inline.) A JAX run has no Trainer to instantiate, and the shared
+# entrypoint code reads `cfg.trainer.accelerator` / `cfg.trainer.precision`,
+# which mean nothing here. Splitting the root keeps both honest instead of
+# leaving a half-applicable Lightning block lying around.
+#
+# Everything else — data, training, optuna, runtime, wandb — is the *same*
+# config group the PyTorch path uses, so hyperparameters stay comparable
+# across the two backends.
+
+defaults:
+  - data: default
+  - model: mamba2_jax
+  - training: default
+  - optuna: mamba2_jax
+  - predict: default
+  - wandb: default
+  - runtime: default
+  - _self_
+
+# Device mesh for data-parallel training (model_jax/sharding.py).
+# null / [-1] = use every visible device. A mesh of 1 makes all collectives
+# no-ops, so the same jitted step runs on a laptop CPU, one GPU, or a TPU slice.
+mesh_shape: null
+
+# NOTE: epochs, batch size, gradient accumulation, grad clipping and the LR
+# schedule all live under `training:` and are read from there by
+# train_jax.run_fold. Do not move them here — Optuna's `_apply_trial_overrides`
+# only writes into `model_kwargs` and `cfg.training`, so a knob relocated to
+# this file would silently ignore the search space.

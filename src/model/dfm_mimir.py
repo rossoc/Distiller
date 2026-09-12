@@ -25,7 +25,7 @@ from transformers import (
 # TokenizersBackend kwarg regression), the shared dtype map, and the
 # pad-token-aware tokenizer loader live in one place so this module and
 # model.mimir_mamba2 cannot drift apart on them.
-from model.hf_compat import DTYPE_MAP, load_tokenizer
+from model.hf_compat import DTYPE_MAP, load_model, load_tokenizer
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +56,7 @@ class DFMMimirModule(L.LightningModule):
         self.pad_token_id = self.tokenizer.pad_token_id
         self.eos_token_id = self.tokenizer.eos_token_id
 
-        self.model = AutoModelForCausalLM.from_pretrained(
+        self.model = load_model(
             model_id,
             trust_remote_code=trust_remote_code,
             dtype=self.torch_dtype,
