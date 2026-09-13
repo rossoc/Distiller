@@ -209,9 +209,13 @@ Per pass:
 - The root's value is left as-is. Members are within `thr` of it by
   construction, so averaging buys nothing measurable.
 
-Note that a clique larger than `n_neighbors` still collapses fully in one pass:
-each member's nearest neighbours are all within `thr`, and union-find closes the
-component transitively across rows.
+Note on cliques: a clique of size <= n_neighbors + 1 is guaranteed to collapse
+fully in one pass because all pairwise edges are captured in the candidate set.
+A clique larger than n_neighbors + 1 collapses fully in one pass if its
+n_neighbors-NN subgraph over the clique is connected; if clustered into dense
+sub-groups whose intra-cluster distances are smaller than inter-cluster distances,
+each sub-cluster collapses in the first pass, and the remaining representatives
+merge across subsequent passes.
 
 ### 5.2 Drop
 

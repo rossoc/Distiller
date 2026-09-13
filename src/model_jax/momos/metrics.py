@@ -36,6 +36,7 @@ __all__ = [
     "swap_rate",
     "usage_counts",
     "usage_entropy",
+    "zero_motif_usage",
 ]
 
 
@@ -84,6 +85,14 @@ def usage_counts(state: MosaicState) -> jnp.ndarray:
     K = state.motifs.shape[0]
     seg = state.mosaic.astype(jnp.int32)
     return jax.ops.segment_sum(jnp.ones_like(seg, dtype=jnp.int32), seg, K)
+
+
+def zero_motif_usage(state: MosaicState) -> Tuple[int, float]:
+    """Number of blocks assigned to motif 0 and its fraction of total blocks (SPEC_PHASE_D_DEFECTS.md §P1)."""
+    counts = usage_counts(state)
+    c0 = int(counts[0]) if counts.size > 0 else 0
+    total = max(1, int(state.mosaic.size))
+    return c0, float(c0 / total)
 
 
 def usage_entropy(state: MosaicState) -> float:

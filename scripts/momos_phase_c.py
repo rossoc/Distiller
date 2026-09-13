@@ -34,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
@@ -97,7 +97,12 @@ _MOSAIC_CONFIG_FIELDS = {f.name for f in dataclass_fields(MosaicConfig)}
 
 
 def _mosaic_config(
-    method: DictConfig, *, S: int, K: int, learning_rate: float
+    method: DictConfig,
+    *,
+    S: int,
+    K: int,
+    learning_rate: float,
+    reserve_zero_motif: Optional[bool] = None,
 ) -> MosaicConfig:
     """Build a MosaicConfig from one ``momos/*.yaml`` group.
 
@@ -110,7 +115,21 @@ def _mosaic_config(
     raw: Dict[str, Any] = OmegaConf.to_container(method, resolve=True)  # type: ignore[assignment]
     kwargs = {k: v for k, v in raw.items() if k in _MOSAIC_CONFIG_FIELDS}
     kwargs.update(S=S, K=K, base_lr=learning_rate)
+    if reserve_zero_motif is not None:
+        kwargs["reserve_zero_motif"] = reserve_zero_motif
     return MosaicConfig(**kwargs)
+
+
+class MomosResult(tuple):
+    """6-tuple return for train_momos with extra usage_0 attributes for P1."""
+    usage_0: int
+    usage_0_frac: float
+
+    def __new__(cls, values, usage_0: int = 0, usage_0_frac: float = 0.0):
+        t = super().__new__(cls, values)
+        t.usage_0 = usage_0
+        t.usage_0_frac = usage_0_frac
+        return t
 
 
 def train_momos(
@@ -123,7 +142,8 @@ def train_momos(
     seq_len: int,
     seed: int,
     learning_rate: float,
-) -> Tuple[float, List[float], List[float], int, float, List[Any]]:
+    reserve_zero_motif: Optional[bool] = None,
+) -> Any:
     """Train one arm, whose knobs come entirely from a ``momos/*.yaml`` group.
 
     ``method`` is one composed config from ``src/config/momos/`` — its
@@ -133,12 +153,15 @@ def train_momos(
 
     Returns:
         (eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history)
+        as a MomosResult with .usage_0 and .usage_0_frac attributes.
     """
     model = _build_model(task, seed)
     graphdef, param_state = nnx.split(model, nnx.Param)
     flat, layout = tiling.flatten_params(param_state, include=tiling.default_include)
     M = math.ceil(layout.n_values / S)
-    cfg = _mosaic_config(method, S=S, K=K, learning_rate=learning_rate)
+    cfg = _mosaic_config(
+        method, S=S, K=K, learning_rate=learning_rate, reserve_zero_motif=reserve_zero_motif
+    )
     arm = str(method.method)
     maint_every = int(method.maintenance_every)
     C = max(1, int(cfg.cohort_frac * M))
@@ -296,7 +319,12 @@ def train_momos(
     eval_loss = float(nnx.merge(graphdef, eval_params).loss(x, y, w))
     final_live = metrics.live_motifs(final_state)
     final_entropy = metrics.usage_entropy(final_state)
-    return eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history
+    u0_count, u0_frac = metrics.zero_motif_usage(final_state)
+    return MomosResult(
+        (eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history),
+        usage_0=u0_count,
+        usage_0_frac=u0_frac,
+    )
 
 
 def _bucket_means(values: List[float], n_buckets: int = 8) -> List[float]:
@@ -341,10 +369,17 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     task = str(gate.task)
     steps, batch, seq_len = int(gate.steps), int(gate.batch), int(gate.seq_len)
     seed, learning_rate = int(gate.seed), float(gate.learning_rate)
+    seeds: List[int] = (
+        [int(s) for s in gate.seeds]
+        if "seeds" in gate and gate.seeds is not None
+        else [seed]
+    )
+    if not seeds:
+        seeds = [seed]
     arms: List[str] = [str(a) for a in gate.arms]
     control = arms[0]
 
-    sample_model = _build_model(task, seed)
+    sample_model = _build_model(task, seeds[0])
     _, sample_params = nnx.split(sample_model, nnx.Param)
     _, sample_layout = tiling.flatten_params(
         sample_params, include=tiling.default_include
@@ -352,9 +387,15 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     n_mosaicked = sample_layout.n_values
 
     baseline_mse = toy_tasks.baseline_mse(
-        task, jax.random.key(seed + 999), seq_len=seq_len
+        task, jax.random.key(seeds[0] + 999), seq_len=seq_len
     )
-    dense_loss = train_dense(task, steps, batch, seq_len, seed, learning_rate)
+    if len(seeds) > 1:
+        dense_losses = [
+            train_dense(task, steps, batch, seq_len, s, learning_rate) for s in seeds
+        ]
+        dense_loss = float(np.mean(dense_losses))
+    else:
+        dense_loss = train_dense(task, steps, batch, seq_len, seeds[0], learning_rate)
 
     # The widest drift buffer among the participating arms; 0 when none of them
     # accumulates drift, in which case the buffer columns are dropped entirely
@@ -368,7 +409,10 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     print(f"task              : {task}")
     print(f"model             : {MODEL_KWARGS}")
     print(f"mosaicked params  : {n_mosaicked:,} values")
-    print(f"steps             : {steps}  (batch {batch}, seq_len {seq_len}, seed {seed})")
+    print(
+        f"steps             : {steps}  (batch {batch}, seq_len {seq_len}, "
+        f"{'seeds ' + str(seeds) if len(seeds) > 1 else 'seed ' + str(seed)})"
+    )
     print(f"learning_rate     : {learning_rate}")
     print(f"arms              : {', '.join(arms)}  (control: {control})")
     for a in arms:
@@ -386,18 +430,28 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
         "loss/dns is a LOSS ratio, not memory."
     )
 
+    gate_rzm = bool(gate.get("reserve_zero_motif", False))
+    show_u0 = (
+        gate_rzm
+        or bool(gate.get("show_u0", False))
+        or any(bool(methods[a].get("reserve_zero_motif", False)) for a in arms)
+    )
+
     header = f"{'S':>2} {'K':>5} {'K/M':>7} {'B/wt':>6} {'mem_x':>6}"
     if show_drift_cols:
         header += f" {'Bwt_dft':>7} {'mem_x':>6}"
     header += f" {'B/wt_inf':>8}"
     for a in arms:
-        header += f" {a[:8]:>8} {a[:5]+'_lv':>6} {a[:5]+'_h':>6}"
+        header += f" {a[:8]:>8} {a[:3]+'_lv':>6} {a[:4]+'_h':>6}"
+        if show_u0:
+            header += f" {a[:3]+'_u0':>6}"
     for a in arms[1:]:
         header += f" {(a[:5] + '/ctl'):>9}"
     header += f" {'loss/dns':>8}  {'best':<12}"
     print(header)
     print("-" * len(header))
 
+    f1_reports: List[str] = []
     wins = {a: 0 for a in arms[1:]}
     total_evaluated = 0
     trace_data = []
@@ -436,27 +490,77 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
             total_evaluated += 1
             print(
                 f"Running cell S={S} K={K} (K/M={km_ratio:.2%}, "
-                f"{bw_base:.3f} B/wt = {mem_base:.1f}x dense)...",
+                f"{bw_base:.3f} B/wt = {mem_base:.1f}x dense, "
+                f"{'seeds ' + str(seeds) if len(seeds) > 1 else 'seed ' + str(seed)})...",
                 flush=True,
             )
 
+            per_seed_results: Dict[int, Dict[str, Any]] = {}
+            for s in seeds:
+                per_seed_results[s] = {}
+                for a in arms:
+                    arm_rzm = gate_rzm or bool(methods[a].get("reserve_zero_motif", False))
+                    res = train_momos(
+                        task,
+                        S,
+                        K,
+                        methods[a],
+                        steps,
+                        batch,
+                        seq_len,
+                        s,
+                        learning_rate,
+                        reserve_zero_motif=arm_rzm,
+                    )
+                    per_seed_results[s][a] = res
+
             losses: Dict[str, float] = {}
+            loss_spreads: Dict[str, float] = {}
             swaps: Dict[str, List[float]] = {}
             spreads: Dict[str, List[float]] = {}
             lives: Dict[str, int] = {}
             entropies: Dict[str, float] = {}
             lifecycles: Dict[str, List[Any]] = {}
+            u0_counts: Dict[str, int] = {}
+            u0_fracs: Dict[str, float] = {}
+
             for a in arms:
-                (
-                    losses[a],
-                    swaps[a],
-                    spreads[a],
-                    lives[a],
-                    entropies[a],
-                    lifecycles[a],
-                ) = train_momos(
-                    task, S, K, methods[a], steps, batch, seq_len, seed, learning_rate
+                arm_losses = [per_seed_results[s][a][0] for s in seeds]
+                losses[a] = float(np.mean(arm_losses))
+                loss_spreads[a] = float(np.max(arm_losses) - np.min(arm_losses))
+                lives[a] = int(round(np.mean([per_seed_results[s][a][3] for s in seeds])))
+                entropies[a] = float(np.mean([per_seed_results[s][a][4] for s in seeds]))
+                u0_counts[a] = int(round(np.mean([per_seed_results[s][a].usage_0 for s in seeds])))
+                u0_fracs[a] = float(np.mean([per_seed_results[s][a].usage_0_frac for s in seeds]))
+                swaps[a] = per_seed_results[seeds[0]][a][1]
+                spreads[a] = per_seed_results[seeds[0]][a][2]
+                lifecycles[a] = per_seed_results[seeds[0]][a][5]
+
+            if len(seeds) > 1:
+                for s in seeds:
+                    s_detail = ", ".join(
+                        f"{a}={per_seed_results[s][a][0]:.5f}" for a in arms
+                    )
+                    print(f"  seed {s}: {s_detail}", flush=True)
+                sp_detail = ", ".join(
+                    f"{a}={loss_spreads[a]:.5f}" for a in arms
                 )
+                print(f"  spread: {sp_detail}", flush=True)
+
+                if "lifecycle" in arms and "single" in arms:
+                    gap = abs(losses["lifecycle"] - losses["single"])
+                    max_sp = max(loss_spreads["lifecycle"], loss_spreads["single"])
+                    if max_sp > gap:
+                        v = f"INCONCLUSIVE (spread {max_sp:.5f} > gap {gap:.5f})"
+                    elif losses["lifecycle"] < losses["single"]:
+                        v = f"PASS (gap {gap:.5f} > spread {max_sp:.5f}, ratio {losses['lifecycle']/losses['single']:.2f}x)"
+                    else:
+                        v = f"FAIL (single beats lifecycle by {gap:.5f} > spread {max_sp:.5f})"
+                    f1_reports.append(
+                        f"  S={S} K={K}: {v}\n"
+                        f"    single:    mean={losses['single']:.5f} spread={loss_spreads['single']:.5f}\n"
+                        f"    lifecycle: mean={losses['lifecycle']:.5f} spread={loss_spreads['lifecycle']:.5f}"
+                    )
 
             best = min(arms, key=lambda a: losses[a])
             for a in arms[1:]:
@@ -469,12 +573,14 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
             row += f" {bw_asym:>8.3f}"
             for a in arms:
                 row += f" {losses[a]:>8.5f} {lives[a]:>6d} {entropies[a]:>6.2f}"
+                if show_u0:
+                    row += f" {u0_fracs[a]:>6.1%}"
             for a in arms[1:]:
                 row += f" {losses[a] / losses[control]:>8.2f}x"
             row += f" {losses[best] / dense_loss:>7.2f}x  {best:<12}"
             print(row, flush=True)
 
-            trace_data.append((S, K, swaps, spreads, lifecycles))
+            trace_data.append((S, K, swaps, spreads, lifecycles, u0_counts, u0_fracs))
 
     elapsed = time.time() - start_time
     print()
@@ -483,11 +589,21 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     for a in arms[1:]:
         print(f"  {a} beat {control} : {wins[a]}/{total_evaluated} cells")
     print(f"  Wall-clock time   : {elapsed:.1f}s on {jax.devices()[0].platform}")
+    if f1_reports:
+        print("-" * 80)
+        print("F1 Seed Replication Report (SPEC_PHASE_D_DEFECTS.md §F1):")
+        for rep in f1_reports:
+            print(rep)
     print("-" * 80, flush=True)
 
-    for S, K, swaps, spreads, lifecycles in trace_data:
+    for item in trace_data:
+        S, K, swaps, spreads, lifecycles = item[:5]
+        u0_c = item[5] if len(item) > 5 else {}
+        u0_f = item[6] if len(item) > 6 else {}
         print(f"\n[Trace S={S}, K={K}]")
         for a in arms:
+            if a in u0_c:
+                print(f"  {a:<9} usage_0   : {u0_c[a]} ({u0_f[a]:.2%})")
             if swaps.get(a):
                 vals = swaps[a]
                 # Per-step arms produce one value per step; windowed arms produce

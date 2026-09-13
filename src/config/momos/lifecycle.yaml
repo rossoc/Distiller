@@ -13,7 +13,7 @@ scale_mode: none
 subset_size: 64
 margin: 1.0e-6
 n_neighbors: 8
-maintenance_every: 50
+maintenance_every: 30
 
 # Drift machinery off.
 cohort_frac: 0.0
@@ -22,5 +22,6 @@ eval_window: 50
 # Phase D lifecycle knobs (SPEC_PHASE_D.md §4, §9)
 lifecycle_every: 1
 merge_quantile: 0.02
-merge_eps: 1.0e-4
+merge_eps: 1.0e-6
 min_live_frac: 0.25
+reserve_zero_motif: false

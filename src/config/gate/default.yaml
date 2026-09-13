@@ -24,3 +24,6 @@ batch: 32
 seq_len: 32
 learning_rate: 6.0e-3
 seed: 0
+seeds: [0]
+reserve_zero_motif: false
+show_u0: false

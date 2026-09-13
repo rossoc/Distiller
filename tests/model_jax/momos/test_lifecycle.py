@@ -63,6 +63,7 @@ def test_lifecycle_config_validation():
     assert cfg.merge_eps == 1e-4
     assert cfg.min_live_frac == 0.25
     assert cfg.lifecycle_every == 1
+    assert MosaicConfig(S=2, K=16).merge_eps == 1e-6
 
     # Invalid merge_quantile
     with pytest.raises(ValueError, match="merge_quantile"):
@@ -179,6 +180,44 @@ def test_chain_merge():
     assert new_active[2] == False
     assert new_active[3] == True
     assert n_merged == 2
+
+
+def test_clique_collapses_to_one_component():
+    """SPEC_PHASE_D_DEFECTS.md §D1: all-column candidates collapse mutual-NN cliques to 1 component."""
+    S, K, M = 1, 4, 100
+    motifs = np.array(
+        [
+            [0.0],
+            [0.001],
+            [0.0025],
+            [0.0035],
+        ],
+        dtype=np.float32,
+    )
+    mosaic = np.array([0, 1, 2, 3] * (M // 4), dtype=mosaic_dtype(K))
+    active = np.ones((K,), dtype=bool)
+
+    scale = 1.0
+    cfg = MosaicConfig(
+        S=S,
+        K=K,
+        scale_mode="none",
+        merge_quantile=0.0,
+        merge_eps=0.004,
+        min_live_frac=0.25,
+        n_neighbors=3,
+    )
+
+    new_mosaic, new_active, n_merged, _, _ = merge_step(motifs, mosaic, active, scale, cfg)
+
+    # In D1 repro, pairwise distances are <= 0.0035 <= thr (0.004).
+    # With candidates from all n_neighbors columns, they must collapse to 1 component (root 0).
+    assert n_merged == 3
+    assert new_active[0] == True
+    assert not new_active[1]
+    assert not new_active[2]
+    assert not new_active[3]
+    np.testing.assert_array_equal(new_mosaic, np.zeros((M,), dtype=mosaic.dtype))
 
 
 # ---------------------------------------------------------------------------
@@ -481,12 +520,12 @@ def test_quantile_self_scales():
         frac = n_merged / K
         fractions[S] = frac
 
-    # All three dimensions should merge approximately merge_q of the dictionary
+    # All three dimensions should merge approximately merge_q of the dictionary within tight tolerance
     for S, frac in fractions.items():
-        assert 0.02 <= frac <= 0.08, (
-            f"S={S}: fraction merged {frac:.4f} outside expected [0.02, 0.08] for quantile {merge_q}"
+        assert abs(frac - merge_q) < 0.005, (
+            f"S={S}: fraction merged {frac:.4f} outside tight [0.045, 0.055] for quantile {merge_q}"
         )
 
-    # Spread between S=1 and S=4 must be small (unlike threshold-driven which has ~500x swing)
+    # Spread between S=1 and S=4 must be tight (self-scaling across S)
     spread = abs(fractions[1] - fractions[4])
-    assert spread < 0.03, f"Spread across S={spread:.4f} exceeds 0.03 tolerance"
+    assert spread < 0.005, f"Spread across S={spread:.4f} exceeds 0.005 tolerance"

@@ -233,12 +233,26 @@ def train_step(
     counts = jax.ops.segment_sum(jnp.ones_like(seg, dtype=jnp.float32), seg, K)
     g_motifs = jax.ops.segment_sum(g_blocks, seg, K) / jnp.maximum(counts, 1.0)[:, None]
     g_motifs = jnp.where(state.active[:, None], g_motifs, 0.0)
+    if cfg.reserve_zero_motif:
+        g_motifs = g_motifs.at[0].set(0.0)
 
     grads = {"motifs": g_motifs, "scales": g_scales}
     params = trainable(state)
     updates, opt_state = optimizer.update(grads, state.opt_state, params)
+    if cfg.reserve_zero_motif:
+        def _zero_motif_slot(path, x):
+            is_motif = any(isinstance(p, jax.tree_util.DictKey) and p.key == "motifs" for p in path)
+            if is_motif and hasattr(x, "shape") and x.ndim >= 1 and x.shape[0] == K:
+                return x.at[0].set(0.0)
+            return x
+
+        opt_state = jax.tree_util.tree_map_with_path(_zero_motif_slot, opt_state)
+        updates["motifs"] = updates["motifs"].at[0].set(0.0)
+
     updated = optax.apply_updates(params, updates)
     motifs, scales = updated["motifs"], updated["scales"]
+    if cfg.reserve_zero_motif:
+        motifs = motifs.at[0].set(0.0)
 
     if drift is not None and cfg.cohort_frac > 0.0:
         M = state.mosaic.shape[0]

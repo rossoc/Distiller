@@ -86,8 +86,9 @@ class MosaicConfig:
     # Phase D additions (SPEC_PHASE_D.md §4):
     lifecycle_every: int = 0  # maintenance passes between lifecycle runs; 0 disables
     merge_quantile: float = 0.02  # fraction of live motifs merged per pass
-    merge_eps: float = 1e-4  # RELATIVE floor: always merge closer than this
+    merge_eps: float = 1e-6  # RELATIVE floor: always merge closer than this
     min_live_frac: float = 0.25  # never merge below this fraction of K
+    reserve_zero_motif: bool = False  # reserve motifs[0] = 0 as permanent zero motif (SPEC_PHASE_D_DEFECTS.md §P1)
 
     def __post_init__(self) -> None:
         if self.S not in (1, 2, 4):
@@ -142,6 +143,8 @@ class MosaicConfig:
             raise ValueError(f"merge_eps must be >= 0, got {self.merge_eps}")
         if not (0.0 < self.min_live_frac <= 1.0):
             raise ValueError(f"min_live_frac must be in (0, 1], got {self.min_live_frac}")
+        if not isinstance(self.reserve_zero_motif, bool):
+            raise ValueError(f"reserve_zero_motif must be a bool, got {self.reserve_zero_motif!r}")
 
 
 def mosaic_dtype(K: int) -> np.dtype:
@@ -235,6 +238,9 @@ def init(
     else:
         idx = jax.random.choice(rng_seed, M, (cfg.K,), replace=cfg.K > M)
         motifs = blocks[idx].astype(jnp.float32)
+
+    if cfg.reserve_zero_motif:
+        motifs = motifs.at[0].set(0.0)
 
     mosaic = jax.random.randint(rng_mosaic, (M,), 0, cfg.K).astype(dtype)
     active = jnp.ones((cfg.K,), dtype=bool)

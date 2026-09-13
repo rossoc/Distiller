@@ -86,7 +86,7 @@ def merge_step(
     if live_count < 2:
         return mosaic, active.copy(), 0, 0.0, False
 
-    # 1. Exact nearest live neighbour for every motif
+    # 1. Exact nearest live neighbours for every motif (all n_neighbors columns)
     graph = maintenance.neighbour_graph(
         jnp.asarray(motifs),
         jnp.asarray(active),
@@ -94,25 +94,50 @@ def merge_step(
     )
     graph_np = np.asarray(graph)
 
-    # d[k] = distance from motif k to its nearest live neighbour, for live k
     live_motifs = motifs[live_indices]
-    nn_indices = graph_np[live_indices, 0]
-    nn_motifs = motifs[nn_indices]
-    diffs = live_motifs - nn_motifs
-    d_array = np.sqrt(np.maximum(np.sum(diffs * diffs, axis=-1), 0.0))
+    nbr_indices = graph_np[live_indices]
+    nbr_motifs = motifs[nbr_indices]
+    diffs_all = live_motifs[:, None, :] - nbr_motifs
+    d_all = np.sqrt(np.maximum(np.sum(diffs_all * diffs_all, axis=-1), 0.0))
 
-    # 2. Threshold determination: quantile-driven with relative floor (§4.1, §5.1)
+    u_grid = np.broadcast_to(live_indices[:, None], nbr_indices.shape)
+    v_grid = nbr_indices
+    valid_edge = active[v_grid] & (u_grid != v_grid)
+
+    u_cand = u_grid[valid_edge]
+    v_cand = v_grid[valid_edge]
+    d_cand = d_all[valid_edge]
+
+    if len(d_cand) == 0:
+        return mosaic, active.copy(), 0, 0.0, False
+
+    # Canonicalise pairs to (min, max) and de-duplicate (SPEC_PHASE_D_DEFECTS.md §D2)
+    min_uv = np.minimum(u_cand, v_cand)
+    max_uv = np.maximum(u_cand, v_cand)
+    edge_ids = (min_uv.astype(np.int64) << 32) | max_uv.astype(np.int64)
+    _, unique_idx = np.unique(edge_ids, return_index=True)
+
+    unique_u = min_uv[unique_idx]
+    unique_v = max_uv[unique_idx]
+    unique_d = d_cand[unique_idx]
+
+    # 2. Threshold determination: size eligible set so realised deactivations ≈ merge_quantile * live
     if cfg.merge_quantile > 0.0:
-        q_val = float(np.quantile(d_array, cfg.merge_quantile))
-        thr = max(q_val, cfg.merge_eps * scale)
+        target_merges = int(round(cfg.merge_quantile * live_count))
+        if target_merges > 0 and len(unique_d) > 0:
+            kth = min(target_merges - 1, len(unique_d) - 1)
+            q_val = float(np.partition(unique_d, kth)[kth])
+            thr = max(q_val, cfg.merge_eps * scale)
+        else:
+            thr = cfg.merge_eps * scale
     else:
         thr = cfg.merge_eps * scale
 
-    # Candidate pairs are (k, nn[k]) with d[k] <= thr
-    eligible_mask = d_array <= thr
-    candidate_u = live_indices[eligible_mask]
-    candidate_v = nn_indices[eligible_mask]
-    candidate_d = d_array[eligible_mask]
+    # Eligible candidate pairs are those with distance <= thr
+    eligible_mask = unique_d <= thr
+    candidate_u = unique_u[eligible_mask]
+    candidate_v = unique_v[eligible_mask]
+    candidate_d = unique_d[eligible_mask]
 
     min_live = max(1, math.ceil(cfg.min_live_frac * K))
     budget = max(0, live_count - min_live)
@@ -225,14 +250,18 @@ def drop_step(
     active: np.ndarray,
     K: int,
     min_live: int = 1,
+    exempt_zero: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, int]:
     """Deactivate motifs with count == 0 after merge (SPEC_PHASE_D.md §5.2).
 
     Counts are recomputed from the post-merge mosaic.
     Never lets active.sum() fall below min_live (and at least 1).
+    When exempt_zero is True (P1), index 0 is unconditionally exempted.
     """
     counts = np.bincount(mosaic, minlength=K)
     to_drop = (counts == 0) & active
+    if exempt_zero and K > 0:
+        to_drop[0] = False
     live_count = int(np.sum(active))
     drop_indices = np.where(to_drop)[0]
 
@@ -282,7 +311,11 @@ def lifecycle_pass(
     # 2. Drop (SPEC_PHASE_D.md §5.2)
     min_live = max(1, math.ceil(cfg.min_live_frac * cfg.K))
     post_drop_active, counts, n_dropped = drop_step(
-        new_mosaic, post_merge_active, cfg.K, min_live=min_live
+        new_mosaic,
+        post_merge_active,
+        cfg.K,
+        min_live=min_live,
+        exempt_zero=getattr(cfg, "reserve_zero_motif", False),
     )
 
     new_state = dataclasses.replace(

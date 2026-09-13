@@ -29,3 +29,4 @@ maintenance_every: 50
 # Drift machinery off.
 cohort_frac: 0.0
 eval_window: 50
+reserve_zero_motif: false
