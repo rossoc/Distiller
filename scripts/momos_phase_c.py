@@ -47,8 +47,9 @@ from omegaconf import DictConfig, OmegaConf  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from model_jax import toy_tasks  # noqa: E402
-from model_jax.momos import maintenance, tiling  # noqa: E402
+from model_jax.momos import maintenance, metrics, tiling  # noqa: E402
 from model_jax.momos.drift import cohort_indices, init_drift_state  # noqa: E402
+from model_jax.momos.lifecycle import lifecycle_pass  # noqa: E402
 from model_jax.momos.reassign import macro_reassign  # noqa: E402
 from model_jax.momos.metrics import drift_buffer_bytes  # noqa: E402
 from model_jax.momos.state import DENSE_BYTES_PER_WEIGHT  # noqa: E402
@@ -122,7 +123,7 @@ def train_momos(
     seq_len: int,
     seed: int,
     learning_rate: float,
-) -> Tuple[float, List[float], List[float]]:
+) -> Tuple[float, List[float], List[float], int, float, List[Any]]:
     """Train one arm, whose knobs come entirely from a ``momos/*.yaml`` group.
 
     ``method`` is one composed config from ``src/config/momos/`` — its
@@ -131,7 +132,7 @@ def train_momos(
     method is a new yaml file, not an edit here.
 
     Returns:
-        (eval_loss, swap_history, spread_history)
+        (eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history)
     """
     model = _build_model(task, seed)
     graphdef, param_state = nnx.split(model, nnx.Param)
@@ -152,6 +153,7 @@ def train_momos(
 
     swap_history: List[float] = []
     spread_history: List[float] = []
+    lifecycle_history: List[Any] = []
 
     if arm == "drift":
 
@@ -237,7 +239,7 @@ def train_momos(
         jit_core_single = jax.jit(core_single)
 
         graph = None
-        if cfg.subset_size > 0 and arm == "single":
+        if cfg.subset_size > 0 and arm in ("single", "lifecycle"):
             graph = maintenance.neighbour_graph(state.motifs, state.active, cfg.n_neighbors)
 
         fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
@@ -248,9 +250,34 @@ def train_momos(
             x, y, w = make_batch(sub, batch, seq_len)
             fields, _, swap_rate = jit_core_single(*fields, graph, step_rng, x, y, w)
 
-            if arm == "single":
+            if arm in ("single", "lifecycle"):
                 swap_history.append(float(swap_rate))
                 if maint_every > 0 and (step + 1) % maint_every == 0:
+                    maint_pass = (step + 1) // maint_every
+                    if (
+                        arm == "lifecycle"
+                        and cfg.lifecycle_every > 0
+                        and (maint_pass % cfg.lifecycle_every == 0)
+                    ):
+                        cur_state = MosaicState(
+                            motifs=fields[0],
+                            mosaic=fields[1],
+                            active=fields[2],
+                            scales=fields[3],
+                            opt_state=fields[4],
+                            layout=layout,
+                            cfg=cfg,
+                            graph=graph,
+                        )
+                        cur_state, pass_metrics = lifecycle_pass(cur_state, step=step)
+                        fields = (
+                            cur_state.motifs,
+                            cur_state.mosaic,
+                            cur_state.active,
+                            cur_state.scales,
+                            cur_state.opt_state,
+                        )
+                        lifecycle_history.append(pass_metrics)
                     graph = maintenance.neighbour_graph(fields[0], fields[2], cfg.n_neighbors)
 
     final_state = MosaicState(
@@ -267,7 +294,9 @@ def train_momos(
     x, y, w = make_batch(sub, 256, seq_len)
     eval_params = reconstruct(final_state)
     eval_loss = float(nnx.merge(graphdef, eval_params).loss(x, y, w))
-    return eval_loss, swap_history, spread_history
+    final_live = metrics.live_motifs(final_state)
+    final_entropy = metrics.usage_entropy(final_state)
+    return eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history
 
 
 def _bucket_means(values: List[float], n_buckets: int = 8) -> List[float]:
@@ -362,7 +391,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
         header += f" {'Bwt_dft':>7} {'mem_x':>6}"
     header += f" {'B/wt_inf':>8}"
     for a in arms:
-        header += f" {a[:9]:>9}"
+        header += f" {a[:8]:>8} {a[:5]+'_lv':>6} {a[:5]+'_h':>6}"
     for a in arms[1:]:
         header += f" {(a[:5] + '/ctl'):>9}"
     header += f" {'loss/dns':>8}  {'best':<12}"
@@ -414,8 +443,18 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
             losses: Dict[str, float] = {}
             swaps: Dict[str, List[float]] = {}
             spreads: Dict[str, List[float]] = {}
+            lives: Dict[str, int] = {}
+            entropies: Dict[str, float] = {}
+            lifecycles: Dict[str, List[Any]] = {}
             for a in arms:
-                losses[a], swaps[a], spreads[a] = train_momos(
+                (
+                    losses[a],
+                    swaps[a],
+                    spreads[a],
+                    lives[a],
+                    entropies[a],
+                    lifecycles[a],
+                ) = train_momos(
                     task, S, K, methods[a], steps, batch, seq_len, seed, learning_rate
                 )
 
@@ -429,13 +468,13 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                 row += f" {bw_drift:>7.3f} {mem_drift:>5.1f}x"
             row += f" {bw_asym:>8.3f}"
             for a in arms:
-                row += f" {losses[a]:>9.5f}"
+                row += f" {losses[a]:>8.5f} {lives[a]:>6d} {entropies[a]:>6.2f}"
             for a in arms[1:]:
                 row += f" {losses[a] / losses[control]:>8.2f}x"
             row += f" {losses[best] / dense_loss:>7.2f}x  {best:<12}"
             print(row, flush=True)
 
-            trace_data.append((S, K, swaps, spreads))
+            trace_data.append((S, K, swaps, spreads, lifecycles))
 
     elapsed = time.time() - start_time
     print()
@@ -446,7 +485,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     print(f"  Wall-clock time   : {elapsed:.1f}s on {jax.devices()[0].platform}")
     print("-" * 80, flush=True)
 
-    for S, K, swaps, spreads in trace_data:
+    for S, K, swaps, spreads, lifecycles in trace_data:
         print(f"\n[Trace S={S}, K={K}]")
         for a in arms:
             if swaps.get(a):
@@ -454,9 +493,19 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                 # Per-step arms produce one value per step; windowed arms produce
                 # one per window, which is already short enough to print raw.
                 shown = _bucket_means(vals, n_buckets=6) if len(vals) > 12 else vals
-                print(f"  {a:<8} swap_rate : " + "  ".join(f"{b:.3f}" for b in shown))
+                print(f"  {a:<9} swap_rate : " + "  ".join(f"{b:.3f}" for b in shown))
             if spreads.get(a):
-                print(f"  {a:<8} spread    : " + "  ".join(f"{b:.3f}" for b in spreads[a]))
+                print(f"  {a:<9} spread    : " + "  ".join(f"{b:.3f}" for b in spreads[a]))
+            if lifecycles.get(a):
+                for idx, lm in enumerate(lifecycles[a]):
+                    print(
+                        f"  {a:<9} pass {idx + 1:<2}   : "
+                        f"merged={lm.n_merged:<3} dropped={lm.n_dropped:<3} "
+                        f"live={lm.live_before}->{lm.live_after} "
+                        f"ent={lm.entropy_before:.2f}->{lm.entropy_after:.2f} "
+                        f"scale={lm.merge_scale:.4e} thr={lm.merge_thr:.4e} "
+                        f"clamped={lm.floor_clamped}"
+                    )
     sys.stdout.flush()
 
 

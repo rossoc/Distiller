@@ -83,6 +83,12 @@ class MosaicConfig:
     A: int = 0  # coprime multiplier for cohort generation; 0 -> pick at init
     B: int = 0  # offset for cohort generation
 
+    # Phase D additions (SPEC_PHASE_D.md §4):
+    lifecycle_every: int = 0  # maintenance passes between lifecycle runs; 0 disables
+    merge_quantile: float = 0.02  # fraction of live motifs merged per pass
+    merge_eps: float = 1e-4  # RELATIVE floor: always merge closer than this
+    min_live_frac: float = 0.25  # never merge below this fraction of K
+
     def __post_init__(self) -> None:
         if self.S not in (1, 2, 4):
             raise ValueError(f"S must be 1, 2, or 4 (SPEC.md §1); got {self.S}")
@@ -101,10 +107,11 @@ class MosaicConfig:
 
         # Phase C2 validations (SPEC_PHASE_C2.md §2):
         if self.S == 1 and self.k_delta != 2:
-            import logging
-            logging.getLogger(__name__).info(
-                f"S=1: clamping k_delta from {self.k_delta} to 2 (unit vectors in 1-D are {{+1, -1}})"
-            )
+            if self.cohort_frac > 0:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"S=1: clamping k_delta from {self.k_delta} to 2 (unit vectors in 1-D are {{+1, -1}})"
+                )
             object.__setattr__(self, "k_delta", 2)
 
         if self.k_delta < 2:
@@ -125,6 +132,16 @@ class MosaicConfig:
             raise ValueError(f"jump_frac_decay must be in (0, 1], got {self.jump_frac_decay}")
         if self.kmeans_iters <= 0:
             raise ValueError(f"kmeans_iters must be > 0, got {self.kmeans_iters}")
+
+        # Phase D validations (SPEC_PHASE_D.md §4):
+        if self.lifecycle_every < 0:
+            raise ValueError(f"lifecycle_every must be >= 0, got {self.lifecycle_every}")
+        if not (0.0 <= self.merge_quantile < 1.0):
+            raise ValueError(f"merge_quantile must be in [0, 1), got {self.merge_quantile}")
+        if self.merge_eps < 0:
+            raise ValueError(f"merge_eps must be >= 0, got {self.merge_eps}")
+        if not (0.0 < self.min_live_frac <= 1.0):
+            raise ValueError(f"min_live_frac must be in (0, 1], got {self.min_live_frac}")
 
 
 def mosaic_dtype(K: int) -> np.dtype:

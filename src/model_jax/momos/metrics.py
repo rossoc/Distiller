@@ -13,6 +13,7 @@ a single step's swap decisions rather than of ``MosaicState`` itself.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from typing import Optional, Tuple
 
@@ -24,6 +25,7 @@ from model_jax.momos.state import DENSE_BYTES_PER_WEIGHT, MosaicState, dictionar
 from model_jax.momos.state import bytes_per_weight as _bytes_per_weight
 
 __all__ = [
+    "LifecycleMetrics",
     "bytes_per_weight",
     "bytes_per_weight_with_drift",
     "codebook_spread",
@@ -32,8 +34,33 @@ __all__ = [
     "live_motifs",
     "matched_rate",
     "swap_rate",
+    "usage_counts",
     "usage_entropy",
 ]
+
+
+@dataclasses.dataclass(frozen=True)
+class LifecycleMetrics:
+    """Per-pass metrics for Phase D lifecycle (SPEC_PHASE_D.md §8).
+
+    ``n_merged``: number of non-root motifs merged into duplicates.
+    ``n_dropped``: number of unused motifs marked inactive.
+    ``live_before``, ``live_after``: live motif counts around the pass.
+    ``entropy_before``, ``entropy_after``: usage entropy in nats around the pass.
+    ``merge_scale``: RMS motif norm of active motifs driving the relative epsilons.
+    ``merge_thr``: realised distance threshold for this pass.
+    ``floor_clamped``: whether min_live_frac raised the threshold to fit the budget.
+    """
+
+    n_merged: int
+    n_dropped: int
+    live_before: int
+    live_after: int
+    entropy_before: float
+    entropy_after: float
+    merge_scale: float
+    merge_thr: float
+    floor_clamped: bool
 
 
 def live_motifs(state: MosaicState) -> int:
@@ -47,6 +74,18 @@ def live_motifs(state: MosaicState) -> int:
     return int(jnp.sum(state.active))
 
 
+def usage_counts(state: MosaicState) -> jnp.ndarray:
+    """Number of blocks assigned to each motif (SPEC_PHASE_D.md §3, §8).
+
+    Recomputed directly from ``state.mosaic`` host-side or in JAX via segment_sum
+    without needing any mutable counters in the jitted training step.
+    Returns (K,) int32.
+    """
+    K = state.motifs.shape[0]
+    seg = state.mosaic.astype(jnp.int32)
+    return jax.ops.segment_sum(jnp.ones_like(seg, dtype=jnp.int32), seg, K)
+
+
 def usage_entropy(state: MosaicState) -> float:
     """Shannon entropy, in nats, of how blocks are distributed over motifs.
 
@@ -54,14 +93,9 @@ def usage_entropy(state: MosaicState) -> float:
     the effective dictionary size the model can express with has silently
     shrunk far below ``K``, and this drops toward zero long before
     :func:`live_motifs` would notice (nothing here is *inactive*, just
-    unused). Computed directly from ``state.mosaic`` rather than from usage
-    counts already lying around, since maintaining separate counters
-    incrementally is exactly the kind of state Phase A/B's static mosaic
-    keeps this file blissfully free of.
+    unused). Computed directly from ``state.mosaic`` via :func:`usage_counts`.
     """
-    K = state.motifs.shape[0]
-    seg = state.mosaic.astype(jnp.int32)
-    counts = jax.ops.segment_sum(jnp.ones_like(seg, dtype=jnp.float32), seg, K)
+    counts = usage_counts(state).astype(jnp.float32)
     total = jnp.sum(counts)
     p = counts / jnp.maximum(total, 1.0)
     # 0 * log(0) := 0: an unused motif contributes nothing to the entropy sum,

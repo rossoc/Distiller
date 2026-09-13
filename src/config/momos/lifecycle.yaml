@@ -1,0 +1,26 @@
+# Hydra config group: momos=lifecycle
+# Phase D — Lifecycle: merge + drop (monotonic simplification) on the host (SPEC_PHASE_D.md).
+# Inherits single's per-step swap on g_blocks (subset_size=64, margin=1e-6)
+# and adds periodic lifecycle passes to simplify redundant slots.
+#
+# Override via: python scripts/momos_phase_c.py momos=lifecycle
+
+method: lifecycle
+
+scale_mode: none
+
+# Single-step swap knobs (inherited from single)
+subset_size: 64
+margin: 1.0e-6
+n_neighbors: 8
+maintenance_every: 50
+
+# Drift machinery off.
+cohort_frac: 0.0
+eval_window: 50
+
+# Phase D lifecycle knobs (SPEC_PHASE_D.md §4, §9)
+lifecycle_every: 1
+merge_quantile: 0.02
+merge_eps: 1.0e-4
+min_live_frac: 0.25
