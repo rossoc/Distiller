@@ -1,0 +1,66 @@
+# Hydra config group: momos=drift
+# Phase C2 — windowed drift accumulation (SPEC_PHASE_C2.md). Accumulates each
+# block's Adam-scaled optimisation trajectory over a rotating cohort, then
+# reassigns at window end using a spherical k-means codebook of drift
+# directions.
+#
+# PARKED — NOT IN THE DEFAULT ARM LIST. Kept because it is a plausible starting
+# point to improve on, not because it earned its place. What the gate measured,
+# all on the 1.63M-parameter model at 300 steps:
+#
+#   * At this file's original defaults (eval_window=50, cohort_frac=0.01) the
+#     mechanism is INERT: it reassigns ~0.05% of the mosaic per window, and the
+#     final loss matches `static` to five decimals in 8 of 9 cells. 0/9.
+#   * At eval_window=10 it beats `static` and `single` in 4 of 9 cells
+#     (best: S=2/K=1024 at 0.67x static, 0.78x single). Not the decisive margin
+#     SPEC_PHASE_C2.md §8 asks for, and that document's own instruction is that
+#     `drift ~= single` means keep `single`.
+#   * Direction is unstable: at S=4 the same dose change that yields 0.53x at
+#     K=4096 yields 1.50x WORSE at K=256.
+#
+# KNOWN DEFECT, fix before trusting any drift number: `cohort_frac` is a
+# fraction of M, and M = N/S, so the same setting buys 4x fewer reassignments
+# at S=4 than at S=1. The drift arm's dose silently varies with S across a
+# sweep, which confounds every S-varying comparison measured so far. Verified
+# directly: re-running S=4 at cohort_frac=0.04 (matching S=1's absolute cohort
+# of 16,339 blocks) unpinned all three S=4 cells that had tied `static` exactly.
+# Redefine this against N, or set the cohort in absolute blocks.
+#
+# Override via: python scripts/momos_phase_c.py momos=drift
+#               python scripts/momos_phase_c.py 'gate.arms=[static,single,drift]'
+
+method: drift
+
+scale_mode: none
+
+# Fraction of M accumulating drift at a time (SPEC_PHASE_C2.md §3). This is
+# what keeps the compression: a full (M, S) fp32 buffer costs 4 bytes/weight
+# and collapses the ratio to 2.4x. Raising it is a bad trade in both
+# directions -- at 0.3 the gate measured 2.215 B/wt (5.4x, less than half the
+# compression) AND a worse loss than static.
+cohort_frac: 0.01
+
+# Steps per window. 50 is the spec's figure and is inert at this model scale;
+# 10 is the smallest value measured to produce a real effect. Frequency is the
+# RAM-safe dose knob -- it changes how often the buffer is drained, never how
+# big it is, so compression is identical at any window size.
+eval_window: 10
+
+# Codebook of drift directions (SPEC_PHASE_C2.md §5.2). Clamped to 2 at S=1,
+# where the only unit vectors are {+1, -1}.
+k_delta: 16
+dir_ema: 0.9
+tau_sim: 0.5
+
+# Eligibility quantile, decayed per window (SPEC_PHASE_C2.md §5.4).
+jump_frac_init: 0.05
+jump_frac_min: 0.005
+jump_frac_decay: 0.98
+
+# Step D's per-step swapping is off -- drift replaces it rather than stacking
+# on top of it.
+subset_size: 0
+margin: 0.0
+
+n_neighbors: 8
+maintenance_every: 50

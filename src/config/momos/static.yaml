@@ -1,0 +1,22 @@
+# Hydra config group: momos=static
+# Phase B — a fixed mosaic. No reassignment of any kind: blocks keep the motif
+# they were initialised with, and only the motifs themselves are trained.
+#
+# This is the control arm every other method is measured against, not a
+# candidate in its own right.
+#
+# Override via: python scripts/momos_phase_c.py momos=static
+
+method: static
+
+scale_mode: none
+
+# Step D disabled. Both are the documented escape hatches (SPEC.md §5.1,
+# SPEC_PHASE_C2.md §2) and together they must reproduce Phase B bit-for-bit.
+subset_size: 0
+cohort_frac: 0.0
+
+margin: 0.0
+n_neighbors: 8
+maintenance_every: 50
+eval_window: 50

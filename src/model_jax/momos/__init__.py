@@ -7,8 +7,31 @@ exact neighbour graph plus the micro-loop's step D). Lifecycle (Phase D) and
 the Mamba2 backbone integration (Phase E) are not implemented.
 """
 
+from model_jax.momos.codebook import (
+    assign_and_null_test,
+    codebook_spread,
+    spherical_kmeans,
+    update_codebook,
+)
+from model_jax.momos.drift import (
+    DriftState,
+    accumulate,
+    adaptive_scale,
+    cohort_indices,
+    init_drift_state,
+    pick_coprime,
+)
 from model_jax.momos.maintenance import neighbour_graph
-from model_jax.momos.metrics import bytes_per_weight, live_motifs, swap_rate, usage_entropy
+from model_jax.momos.metrics import (
+    bytes_per_weight,
+    bytes_per_weight_with_drift,
+    jump_eligible_rate,
+    live_motifs,
+    matched_rate,
+    swap_rate,
+    usage_entropy,
+)
+from model_jax.momos.reassign import WindowMetrics, macro_reassign
 from model_jax.momos.state import (
     DENSE_BYTES_PER_WEIGHT,
     MosaicConfig,
@@ -33,26 +56,41 @@ from model_jax.momos.train_step import reconstruct, train_step
 
 __all__ = [
     "DENSE_BYTES_PER_WEIGHT",
+    "DriftState",
     "MosaicConfig",
     "MosaicState",
     "ParamLayout",
+    "WindowMetrics",
+    "accumulate",
+    "adaptive_scale",
+    "assign_and_null_test",
     "asymptotic_bytes_per_weight",
     "block_tensor_ids",
     "bytes_per_weight",
+    "bytes_per_weight_with_drift",
+    "codebook_spread",
+    "cohort_indices",
     "default_include",
     "dictionary_bytes",
     "flatten_params",
     "from_blocks",
     "include_everything",
     "init",
+    "init_drift_state",
+    "jump_eligible_rate",
     "live_motifs",
+    "macro_reassign",
+    "matched_rate",
     "mosaic_dtype",
     "neighbour_graph",
+    "pick_coprime",
     "reconstruct",
+    "spherical_kmeans",
     "swap_rate",
     "to_blocks",
     "trainable",
     "train_step",
     "unflatten_params",
+    "update_codebook",
     "usage_entropy",
 ]

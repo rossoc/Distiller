@@ -1,0 +1,21 @@
+# Hydra root config for the momos compression research scripts
+# (scripts/momos_phase_c.py). The training entrypoints keep using config.yaml
+# (PyTorch) and config_jax.yaml (JAX).
+#
+# A third root rather than a `momos:` block on config_jax.yaml, because momos
+# is not wired into the training path at all -- src/train_jax.py never imports
+# it. Per SPEC.md §8 that integration is Phase E's job ("behind a config flag;
+# the dense path stays default"), and hanging a config group off config_jax
+# before the code reads it would be dead config that looks live.
+#
+#   python scripts/momos_phase_c.py
+#   python scripts/momos_phase_c.py momos=drift
+#   python scripts/momos_phase_c.py 'gate.arms=[static,single,drift]'
+#   python scripts/momos_phase_c.py 'gate.s=[2]' 'gate.k=[1024]' gate.steps=600
+
+defaults:
+  # The method whose knobs the drift/single arms read when they are not the
+  # arm being swept. `gate.arms` is what actually decides which run.
+  - momos: single
+  - gate: default
+  - _self_

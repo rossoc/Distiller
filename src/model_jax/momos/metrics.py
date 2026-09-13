@@ -13,13 +13,27 @@ a single step's swap decisions rather than of ``MosaicState`` itself.
 
 from __future__ import annotations
 
-from typing import Tuple
+import math
+from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 
-from model_jax.momos.state import MosaicState
+from model_jax.momos.codebook import codebook_spread
+from model_jax.momos.state import DENSE_BYTES_PER_WEIGHT, MosaicState, dictionary_bytes, mosaic_dtype
 from model_jax.momos.state import bytes_per_weight as _bytes_per_weight
+
+__all__ = [
+    "bytes_per_weight",
+    "bytes_per_weight_with_drift",
+    "codebook_spread",
+    "drift_buffer_bytes",
+    "jump_eligible_rate",
+    "live_motifs",
+    "matched_rate",
+    "swap_rate",
+    "usage_entropy",
+]
 
 
 def live_motifs(state: MosaicState) -> int:
@@ -85,3 +99,41 @@ def bytes_per_weight(state: MosaicState, N: int) -> Tuple[float, float]:
     """
     n_tensors = state.layout.n_tensors if state.scales is not None else 0
     return _bytes_per_weight(N, state.cfg, n_tensors)
+
+
+def matched_rate(matched: jnp.ndarray) -> float:
+    """Fraction of cohort matching at least one codebook direction with cos >= tau_sim."""
+    if matched.size == 0:
+        return 0.0
+    return float(jnp.mean(matched.astype(jnp.float32)))
+
+
+def jump_eligible_rate(can_jump: jnp.ndarray) -> float:
+    """Fraction of cohort eligible to jump before the nearest neighbour test."""
+    if can_jump.size == 0:
+        return 0.0
+    return float(jnp.mean(can_jump.astype(jnp.float32)))
+
+
+def drift_buffer_bytes(M: int, S: int, cohort_frac: float) -> int:
+    """Bytes required for the (C, S) fp32 drift buffer (SPEC_PHASE_C2.md §3)."""
+    C = max(1, int(cohort_frac * M))
+    return C * S * 4
+
+
+def bytes_per_weight_with_drift(
+    state: MosaicState, N: int, cohort_frac: Optional[float] = None
+) -> Tuple[float, float]:
+    """Actual bytes/weight including the transient drift buffer, and ratio vs dense fp32 (SPEC_PHASE_C2.md §6)."""
+    if cohort_frac is None:
+        cohort_frac = state.cfg.cohort_frac
+    if N <= 0:
+        raise ValueError(f"N must be positive, got {N}")
+    M = math.ceil(N / state.cfg.S)
+    mosaic_bytes = M * mosaic_dtype(state.cfg.K).itemsize
+    n_tensors = state.layout.n_tensors if state.scales is not None else 0
+    dict_b = dictionary_bytes(state.cfg, n_tensors)
+    drift_b = drift_buffer_bytes(M, state.cfg.S, cohort_frac) if cohort_frac > 0 else 0
+    total = mosaic_bytes + dict_b + drift_b
+    per_weight = total / N
+    return per_weight, DENSE_BYTES_PER_WEIGHT / per_weight

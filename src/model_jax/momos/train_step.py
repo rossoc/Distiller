@@ -72,6 +72,7 @@ import jax.numpy as jnp
 import optax
 
 from model_jax.momos import metrics, tiling
+from model_jax.momos.drift import accumulate, cohort_indices, pick_coprime
 from model_jax.momos.state import MosaicConfig, MosaicState, trainable
 
 # (params_tree, batch) -> scalar loss. `params_tree` is whatever
@@ -189,14 +190,21 @@ def train_step(
     rng: jax.Array,
     loss_fn: LossFn,
     optimizer: optax.GradientTransformation,
-) -> Tuple[MosaicState, jnp.ndarray, jnp.ndarray]:
+    drift: Optional[jnp.ndarray] = None,
+    window: int = 0,
+) -> Any:
     """One micro-loop step: block-level grad, aggregate once, motif-level
-    update, then propose swaps from that update (SPEC.md §5, steps A-D).
+    update, then propose swaps or accumulate drift (SPEC.md §5, SPEC_PHASE_C2.md §4).
 
-    Returns ``(new_state, loss, swap_rate)`` — ``swap_rate`` is exactly zero
-    whenever step D is disabled (``cfg.subset_size == 0`` or no graph is
-    attached), so every existing Phase B caller that only cared about
-    ``(new_state, loss)`` needs nothing more than unpacking the third value.
+    When ``drift is None`` (the default, or the `single` / `static` arm):
+        Returns ``(new_state, loss, swap_rate)`` — ``swap_rate`` is exactly zero
+        whenever step D is disabled (``cfg.subset_size == 0`` or no graph is
+        attached), so every existing caller continues to unpack 3 values.
+
+    When ``drift is not None`` (the Phase C2 `drift` arm):
+        Accumulates gradient drift for the active cohort without proposing
+        per-step swaps (swaps are deferred to the window boundary in the
+        macro loop). Returns ``(new_state, loss, swap_rate, new_drift)``.
 
     Order matters (SPEC.md §5): the gradient is computed against
     ``state.mosaic`` before anything about the dictionary changes, so there is
@@ -232,11 +240,23 @@ def train_step(
     updated = optax.apply_updates(params, updates)
     motifs, scales = updated["motifs"], updated["scales"]
 
-    mosaic, swap_rate = _propose_swaps(
-        state, cfg, motifs, updates["motifs"], g_motifs, g_blocks, rng
-    )
+    if drift is not None and cfg.cohort_frac > 0.0:
+        M = state.mosaic.shape[0]
+        C = max(1, int(cfg.cohort_frac * M))
+        A = cfg.A if cfg.A != 0 else pick_coprime(M)
+        cohort = cohort_indices(window, M, C, A, cfg.B)
+        new_drift = accumulate(drift, g_blocks, cohort, opt_state, state.mosaic, cfg)
+        mosaic = state.mosaic
+        swap_rate = jnp.zeros((), dtype=jnp.float32)
+    else:
+        new_drift = None
+        mosaic, swap_rate = _propose_swaps(
+            state, cfg, motifs, updates["motifs"], g_motifs, g_blocks, rng
+        )
 
     new_state = dataclasses.replace(
         state, motifs=motifs, scales=scales, opt_state=opt_state, mosaic=mosaic
     )
+    if drift is not None:
+        return new_state, loss, swap_rate, new_drift
     return new_state, loss, swap_rate

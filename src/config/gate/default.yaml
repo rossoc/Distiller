@@ -1,0 +1,26 @@
+# Hydra config group: gate
+# The (S, K) sweep the momos comparison scripts run, and which methods take
+# part in it.
+#
+# Override via: python scripts/momos_phase_c.py gate.steps=1000
+#               python scripts/momos_phase_c.py 'gate.k=[4096]' 'gate.s=[2]'
+
+# Which momos/*.yaml methods to compare, in table-column order. `static` is
+# the control and should stay first. `drift` is deliberately absent -- it is
+# implemented and still runnable ('gate.arms=[static,single,drift]'), but it
+# did not clear SPEC_PHASE_C2.md §8's bar; see momos/drift.yaml for the
+# measurements and the known cohort_frac defect.
+arms: [static, single]
+
+task: cumsum
+
+# Regime requirement (SPEC.md §8): the gate is only valid at ~1M mosaicked
+# values. These are swept; every other momos knob comes from the momos group.
+s: [1, 2, 4]
+k: [256, 1024, 4096]
+
+steps: 300
+batch: 32
+seq_len: 32
+learning_rate: 6.0e-3
+seed: 0

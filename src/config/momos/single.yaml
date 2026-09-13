@@ -1,0 +1,31 @@
+# Hydra config group: momos=single
+# Phase C — per-step swapping on the live gradient (`train_step._propose_swaps`).
+# Each step examines `subset_size` blocks and moves any whose nearest neighbour
+# in the motif graph beats its current motif by more than `margin`.
+#
+# THIS IS THE ADOPTED METHOD. Measured against `static` on the 1.63M-parameter
+# gate at 300 steps, it wins 7 of 9 (S, K) cells — losing only S=1/K=1024 and
+# S=4/K=1024 — which is what passes SPEC.md §8's Phase C gate ("at matched K,
+# dynamic beats static"). It carries one knob (`subset_size`); `drift` carries
+# three and did not clear it. See momos/drift.yaml for that comparison.
+#
+# Override via: python scripts/momos_phase_c.py momos=single
+
+method: single
+
+scale_mode: none
+
+# Blocks examined for reassignment per step. 0 disables step D entirely.
+subset_size: 64
+
+# Hysteresis: swap only if the candidate is better by strictly more than this.
+margin: 1.0e-6
+
+# Neighbour-graph out-degree per motif (SPEC.md §6.1), rebuilt on the host
+# every `maintenance_every` steps.
+n_neighbors: 8
+maintenance_every: 50
+
+# Drift machinery off.
+cohort_frac: 0.0
+eval_window: 50

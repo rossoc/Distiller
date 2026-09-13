@@ -1,62 +1,65 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Phase C's gate (SPEC.md §8): at matched K, does dynamic swapping beat the
-static Phase B mosaic?
+"""MoMos reassignment gate: compare mosaic reassignment methods on a toy SSM.
+
+Every method is a Hydra config group in ``src/config/momos/``; ``gate.arms``
+picks which ones run and in what column order, with the first arm as the
+control the ratio columns are measured against.
 
     python scripts/momos_phase_c.py
-    python scripts/momos_phase_c.py --k 1024 4096 --s 2 4
-    python scripts/momos_phase_c.py --steps 400 --subset-size 128
+    python scripts/momos_phase_c.py 'gate.s=[2]' 'gate.k=[1024]' gate.steps=600
+    python scripts/momos_phase_c.py 'gate.arms=[static,single,drift]'
+    python scripts/momos_phase_c.py momos=drift momos.eval_window=5
 
-For every (S, K) cell this trains the *same* toy model, from the *same* seed,
-for the *same* number of steps, twice: once with ``cfg.subset_size=0`` (step D
-disabled — Phase B's static mosaic) and once with swapping turned on (step D
-enabled, with the neighbour graph rebuilt from the live dictionary every
-``--maintenance-every`` steps). Everything else — learning rate, batch,
-architecture, random seed — is identical between the two runs, so any
-difference in final loss is attributable to step D alone, not to a
-confound. The dense baseline (an ordinary ``nnx.Optimizer`` on the same
-architecture) is trained once, since it does not depend on ``S``/``K`` at all.
+| arm    | description                                                   |
+|--------|---------------------------------------------------------------|
+| static | Phase B, no reassignment (subset_size=0, cohort_frac=0)       |
+| single | Phase C, per-step swap on g_blocks — the adopted method       |
+| drift  | Phase C2, windowed drift accumulation; parked, off by default |
 
-SPEC.md's own words for the gate this script exists to run: "at matched K,
-dynamic beats static. If not, stop — the swap criterion is not earning its
-complexity." This script prints what it measures either way; it does not
-retry with different hyperparameters until the gate passes.
-
-**On ``--margin``'s scale.** The swap criterion compares a candidate
-neighbour's distance to ``w_prop`` against ``d_cur = ||update||^2`` — the
-*squared magnitude of one optimiser step* (see ``train_step.py``'s Correction
-docstring for why it is this and not the spec's literal, always-zero
-formula). Adam normalises its step size to roughly the learning rate, so
-``d_cur`` sits close to ``learning_rate**2`` regardless of gradient scale —
-measured directly at this script's defaults, ``d_cur`` medians ~3.6e-5 at
-``learning_rate=6e-3``. A margin at or above that (the first value tried
-here, ``1e-4``) makes ``d_cur - margin`` negative for essentially every
-block, which no non-negative squared distance can ever beat — swap rate is
-then exactly and permanently zero, not "low". ``--margin`` must be kept
-comfortably below ``learning_rate**2`` for step D to do anything at all.
+Regime requirements (SPEC.md §8, SPEC_PHASE_C2.md §8):
+- Model with >= 1M mosaicked values: toy_tasks.build(..., d_model=256, num_layers=4)
+  giving ~1.63M mosaicked parameters.
+- Skip any cell with K >= M/10 (degenerate/out of regime).
+- Skip any cell whose compressed footprint reaches dense fp32 (SPEC.md §2.1);
+  below the crossover N the dictionary does not amortise.
+- Print K/M and the compression ledger as columns so the regime is visible.
+- Report real experimental measurements without tuning until it passes.
 """
 
 from __future__ import annotations
 
-import argparse
+import math
 import sys
 import time
 from pathlib import Path
+from dataclasses import fields as dataclass_fields
+from typing import Any, Dict, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import hydra  # noqa: E402
 import jax  # noqa: E402
+import jax.numpy as jnp  # noqa: E402
 import numpy as np  # noqa: E402
 import optax  # noqa: E402
+from omegaconf import DictConfig, OmegaConf  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from model_jax import toy_tasks  # noqa: E402
 from model_jax.momos import maintenance, tiling  # noqa: E402
+from model_jax.momos.drift import cohort_indices, init_drift_state  # noqa: E402
+from model_jax.momos.reassign import macro_reassign  # noqa: E402
+from model_jax.momos.metrics import drift_buffer_bytes  # noqa: E402
+from model_jax.momos.state import DENSE_BYTES_PER_WEIGHT  # noqa: E402
 from model_jax.momos.state import MosaicConfig, MosaicState  # noqa: E402
+from model_jax.momos.state import asymptotic_bytes_per_weight  # noqa: E402
+from model_jax.momos.state import bytes_per_weight as ledger_bytes_per_weight  # noqa: E402
 from model_jax.momos.state import init as momos_init  # noqa: E402
 from model_jax.momos.train_step import reconstruct, train_step  # noqa: E402
 
-MODEL_KWARGS = dict(d_model=32, num_layers=2, state_size=16, chunk_size=8)
+# Target regime: >= 1M parameters (~1.63M mosaicked)
+MODEL_KWARGS = dict(d_model=256, num_layers=4, state_size=16, chunk_size=8)
 
 
 def _build_model(task: str, seed: int) -> nnx.Module:
@@ -66,8 +69,7 @@ def _build_model(task: str, seed: int) -> nnx.Module:
 def train_dense(
     task: str, steps: int, batch: int, seq_len: int, seed: int, learning_rate: float
 ) -> float:
-    """Ordinary dense training of the same architecture — computed once,
-    since neither ``S`` nor ``K`` (both MoMos-only concepts) affects it."""
+    """Ordinary dense training baseline on the ~1.63M parameter architecture."""
     model = _build_model(task, seed)
     tx = optax.adam(learning_rate)
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
@@ -90,42 +92,56 @@ def train_dense(
     return float(model.loss(x, y, w))
 
 
+_MOSAIC_CONFIG_FIELDS = {f.name for f in dataclass_fields(MosaicConfig)}
+
+
+def _mosaic_config(
+    method: DictConfig, *, S: int, K: int, learning_rate: float
+) -> MosaicConfig:
+    """Build a MosaicConfig from one ``momos/*.yaml`` group.
+
+    Only keys that are real MosaicConfig fields are forwarded, so a yaml may
+    carry presentation/runner knobs (``method``, ``maintenance_every``)
+    alongside the dataclass's own without a filter list here going stale every
+    time SPEC adds a knob. ``S``/``K`` come from the gate sweep and ``base_lr``
+    from the run's learning rate, so all three override whatever the file says.
+    """
+    raw: Dict[str, Any] = OmegaConf.to_container(method, resolve=True)  # type: ignore[assignment]
+    kwargs = {k: v for k, v in raw.items() if k in _MOSAIC_CONFIG_FIELDS}
+    kwargs.update(S=S, K=K, base_lr=learning_rate)
+    return MosaicConfig(**kwargs)
+
+
 def train_momos(
     task: str,
     S: int,
     K: int,
+    method: "DictConfig",
     steps: int,
     batch: int,
     seq_len: int,
     seed: int,
     learning_rate: float,
-    subset_size: int,
-    margin: float,
-    n_neighbors: int,
-    maintenance_every: int,
-) -> tuple:
-    """One Phase C cell: train with step D either on (``subset_size > 0``) or
-    off (``subset_size == 0``, Phase B's exact behaviour). Returns
-    ``(eval_loss, swap_rate_history)`` — the latter empty when swapping is
-    off.
+) -> Tuple[float, List[float], List[float]]:
+    """Train one arm, whose knobs come entirely from a ``momos/*.yaml`` group.
 
-    Mirrors ``momos_capacity.py``'s jit strategy: ``MosaicState`` is not a
-    registered pytree (its ``layout``/``cfg`` are static, host-side data), so
-    the hot loop closes over those two and jits only the genuinely traced
-    arrays — including ``graph``, which changes *value* every
-    ``maintenance_every`` steps but never changes shape, so re-passing a
-    freshly rebuilt graph into the same compiled ``jit_core`` costs nothing
-    beyond the graph rebuild itself (a handful of milliseconds — SPEC.md
-    §6.1's 67 Mflop estimate at the largest cell used here).
+    ``method`` is one composed config from ``src/config/momos/`` — its
+    ``method:`` field names the arm and the rest are MosaicConfig knobs. The
+    branch below is on that name rather than on a hardcoded arm list, so a new
+    method is a new yaml file, not an edit here.
+
+    Returns:
+        (eval_loss, swap_history, spread_history)
     """
     model = _build_model(task, seed)
     graphdef, param_state = nnx.split(model, nnx.Param)
     flat, layout = tiling.flatten_params(param_state, include=tiling.default_include)
+    M = math.ceil(layout.n_values / S)
+    cfg = _mosaic_config(method, S=S, K=K, learning_rate=learning_rate)
+    arm = str(method.method)
+    maint_every = int(method.maintenance_every)
+    C = max(1, int(cfg.cohort_frac * M))
 
-    cfg = MosaicConfig(
-        S=S, K=K, scale_mode="none",
-        subset_size=subset_size, margin=margin, n_neighbors=n_neighbors,
-    )
     tx = optax.adam(learning_rate)
     state = momos_init(flat, layout, cfg, tx, jax.random.key(seed))
     make_batch = toy_tasks.TASKS[task]
@@ -134,176 +150,338 @@ def train_momos(
         x, y, w = batch_xyw
         return nnx.merge(graphdef, params).loss(x, y, w)
 
-    def core(motifs, mosaic, active, scales, opt_state, graph, rng, x, y, w):
-        s = MosaicState(
-            motifs=motifs, mosaic=mosaic, active=active, scales=scales,
-            opt_state=opt_state, layout=layout, cfg=cfg, graph=graph,
-        )
-        new_s, loss, swap_rate = train_step(s, (x, y, w), rng, loss_fn, tx)
-        fields = (new_s.motifs, new_s.mosaic, new_s.active, new_s.scales, new_s.opt_state)
-        return fields, loss, swap_rate
+    swap_history: List[float] = []
+    spread_history: List[float] = []
 
-    jit_core = jax.jit(core)
+    if arm == "drift":
 
-    graph = None
-    if subset_size > 0:
-        graph = maintenance.neighbour_graph(state.motifs, state.active, n_neighbors)
+        def core_drift(motifs, mosaic, active, scales, opt_state, drift, window, rng, x, y, w):
+            s = MosaicState(
+                motifs=motifs,
+                mosaic=mosaic,
+                active=active,
+                scales=scales,
+                opt_state=opt_state,
+                layout=layout,
+                cfg=cfg,
+                graph=None,
+            )
+            new_s, loss, _, new_drift = train_step(
+                s, (x, y, w), rng, loss_fn, tx, drift=drift, window=window
+            )
+            fields = (new_s.motifs, new_s.mosaic, new_s.active, new_s.scales, new_s.opt_state)
+            return fields, loss, new_drift
 
-    fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
-    key = jax.random.key(seed + 1)
-    swap_history = []
-    for step in range(steps):
-        key, sub, step_rng = jax.random.split(key, 3)
-        x, y, w = make_batch(sub, batch, seq_len)
-        fields, _, swap_rate = jit_core(*fields, graph, step_rng, x, y, w)
-        if subset_size > 0:
-            swap_history.append(float(swap_rate))
-            if maintenance_every > 0 and (step + 1) % maintenance_every == 0:
-                graph = maintenance.neighbour_graph(fields[0], fields[2], n_neighbors)
+        jit_core_drift = jax.jit(core_drift)
+
+        graph = maintenance.neighbour_graph(state.motifs, state.active, cfg.n_neighbors)
+        drift_st = init_drift_state(cfg, M, rng=jax.random.key(seed + 2))
+        drift = drift_st.drift
+        codebook_dirs = drift_st.codebook_dirs
+        window = 0
+
+        fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
+        key = jax.random.key(seed + 1)
+
+        for step in range(steps):
+            key, sub, step_rng = jax.random.split(key, 3)
+            x, y, w = make_batch(sub, batch, seq_len)
+            fields, _, drift = jit_core_drift(
+                *fields, drift, window, step_rng, x, y, w
+            )
+
+            if (step + 1) % cfg.eval_window == 0:
+                cohort = cohort_indices(window, M, C, cfg.A, cfg.B)
+                new_mosaic, codebook_dirs, win_metrics = macro_reassign(
+                    drift=drift,
+                    cohort=cohort,
+                    motifs=fields[0],
+                    mosaic=fields[1],
+                    active=fields[2],
+                    graph=graph,
+                    codebook_dirs=codebook_dirs,
+                    window=window,
+                    cfg=cfg,
+                )
+                fields = (fields[0], new_mosaic, fields[2], fields[3], fields[4])
+                swap_history.append(float(win_metrics.swap_rate))
+                spread_history.append(float(win_metrics.codebook_spread))
+
+                # Reset drift buffer and increment window
+                drift = jnp.zeros((C, cfg.S), dtype=jnp.float32)
+                window += 1
+
+            # Graph rebuild is on its own cadence, NOT nested inside the
+            # window-end branch: nesting it silently skipped every rebuild
+            # whenever eval_window did not divide maintenance_every.
+            if maint_every > 0 and (step + 1) % maint_every == 0:
+                graph = maintenance.neighbour_graph(fields[0], fields[2], cfg.n_neighbors)
+
+    else:
+
+        def core_single(motifs, mosaic, active, scales, opt_state, graph, rng, x, y, w):
+            s = MosaicState(
+                motifs=motifs,
+                mosaic=mosaic,
+                active=active,
+                scales=scales,
+                opt_state=opt_state,
+                layout=layout,
+                cfg=cfg,
+                graph=graph,
+            )
+            new_s, loss, swap_rate = train_step(s, (x, y, w), rng, loss_fn, tx)
+            fields = (new_s.motifs, new_s.mosaic, new_s.active, new_s.scales, new_s.opt_state)
+            return fields, loss, swap_rate
+
+        jit_core_single = jax.jit(core_single)
+
+        graph = None
+        if cfg.subset_size > 0 and arm == "single":
+            graph = maintenance.neighbour_graph(state.motifs, state.active, cfg.n_neighbors)
+
+        fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
+        key = jax.random.key(seed + 1)
+
+        for step in range(steps):
+            key, sub, step_rng = jax.random.split(key, 3)
+            x, y, w = make_batch(sub, batch, seq_len)
+            fields, _, swap_rate = jit_core_single(*fields, graph, step_rng, x, y, w)
+
+            if arm == "single":
+                swap_history.append(float(swap_rate))
+                if maint_every > 0 and (step + 1) % maint_every == 0:
+                    graph = maintenance.neighbour_graph(fields[0], fields[2], cfg.n_neighbors)
 
     final_state = MosaicState(
-        motifs=fields[0], mosaic=fields[1], active=fields[2], scales=fields[3],
-        opt_state=fields[4], layout=layout, cfg=cfg, graph=graph,
+        motifs=fields[0],
+        mosaic=fields[1],
+        active=fields[2],
+        scales=fields[3],
+        opt_state=fields[4],
+        layout=layout,
+        cfg=cfg,
+        graph=None,
     )
     key, sub = jax.random.split(key)
     x, y, w = make_batch(sub, 256, seq_len)
     eval_params = reconstruct(final_state)
     eval_loss = float(nnx.merge(graphdef, eval_params).loss(x, y, w))
-    return eval_loss, swap_history
+    return eval_loss, swap_history, spread_history
 
 
-def _bucket_means(values, n_buckets: int = 8):
+def _bucket_means(values: List[float], n_buckets: int = 8) -> List[float]:
     if not values:
         return []
     arr = np.asarray(values, dtype=np.float64)
     edges = np.linspace(0, len(arr), n_buckets + 1).astype(int)
-    return [float(arr[edges[i]:edges[i + 1]].mean()) for i in range(n_buckets)
-            if edges[i + 1] > edges[i]]
+    return [
+        float(arr[edges[i] : edges[i + 1]].mean())
+        for i in range(n_buckets)
+        if edges[i + 1] > edges[i]
+    ]
 
 
-def run_gate(
-    task: str,
-    S_values,
-    K_values,
-    steps: int,
-    batch: int,
-    seq_len: int,
-    seed: int,
-    learning_rate: float,
-    subset_size: int,
-    margin: float,
-    n_neighbors: int,
-    maintenance_every: int,
-) -> None:
-    baseline_mse = toy_tasks.baseline_mse(task, jax.random.key(seed + 999), seq_len=seq_len)
+def _cell_ledger(
+    N: int, S: int, K: int, cohort_frac: float
+) -> Tuple[float, float, float, float, float]:
+    """Persistent-memory ledger for one (S, K) cell (SPEC.md §2, §2.1).
+
+    Reuses the ledger helpers rather than restating the arithmetic: the
+    static/single arms pay mosaic + dictionary, and the drift arm additionally
+    pays the (C, S) fp32 drift buffer of SPEC_PHASE_C2.md §3.
+
+    Returns ``(bw_base, ratio_base, bw_drift, ratio_drift, bw_asymptotic)``,
+    where each ``bw_*`` is bytes/weight and each ``ratio_*`` is the factor
+    against dense fp32 training (12 B/wt).
+    """
+    cfg = MosaicConfig(S=S, K=K, scale_mode="none", cohort_frac=cohort_frac)
+    # scale_mode="none" for every arm, so n_tensors contributes nothing.
+    bw_base, ratio_base = ledger_bytes_per_weight(N, cfg, 0)
+    M = math.ceil(N / S)
+    drift_b = drift_buffer_bytes(M, S, cohort_frac) if cohort_frac > 0 else 0
+    bw_drift = bw_base + drift_b / N
+    return bw_base, ratio_base, bw_drift, DENSE_BYTES_PER_WEIGHT / bw_drift, asymptotic_bytes_per_weight(cfg)
+
+def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
+    """Compare every method in ``gate.arms`` across the (S, K) sweep.
+
+    The first arm is the control that the ratio columns are taken against;
+    `gate/default.yaml` documents that `static` should stay in that slot.
+    """
+    task = str(gate.task)
+    steps, batch, seq_len = int(gate.steps), int(gate.batch), int(gate.seq_len)
+    seed, learning_rate = int(gate.seed), float(gate.learning_rate)
+    arms: List[str] = [str(a) for a in gate.arms]
+    control = arms[0]
+
+    sample_model = _build_model(task, seed)
+    _, sample_params = nnx.split(sample_model, nnx.Param)
+    _, sample_layout = tiling.flatten_params(
+        sample_params, include=tiling.default_include
+    )
+    n_mosaicked = sample_layout.n_values
+
+    baseline_mse = toy_tasks.baseline_mse(
+        task, jax.random.key(seed + 999), seq_len=seq_len
+    )
     dense_loss = train_dense(task, steps, batch, seq_len, seed, learning_rate)
 
+    # The widest drift buffer among the participating arms; 0 when none of them
+    # accumulates drift, in which case the buffer columns are dropped entirely
+    # rather than printed as a column of zeros.
+    max_cohort_frac = max(float(methods[a].cohort_frac) for a in arms)
+    show_drift_cols = max_cohort_frac > 0
+
+    print("=" * 80)
+    print("MoMos reassignment gate".center(80))
+    print("=" * 80)
     print(f"task              : {task}")
     print(f"model             : {MODEL_KWARGS}")
+    print(f"mosaicked params  : {n_mosaicked:,} values")
     print(f"steps             : {steps}  (batch {batch}, seq_len {seq_len}, seed {seed})")
-    print(f"subset_size       : {subset_size}   margin: {margin}   "
-          f"n_neighbors: {n_neighbors}   maintenance_every: {maintenance_every}")
-    print(f"constant baseline : {baseline_mse:.4f}  (best constant predictor)")
+    print(f"learning_rate     : {learning_rate}")
+    print(f"arms              : {', '.join(arms)}  (control: {control})")
+    for a in arms:
+        knobs = OmegaConf.to_container(methods[a], resolve=True)
+        knobs.pop("method", None)
+        print(f"  {a:<15} : " + ", ".join(f"{k}={v}" for k, v in knobs.items()))
+    print(f"constant baseline : {baseline_mse:.4f}")
     print(f"dense training    : {dense_loss:.5f}  ({dense_loss / baseline_mse:.1%} of baseline)")
     print()
 
-    header = (
-        f"{'S':>2} {'K':>6} {'static':>10} {'dynamic':>10} {'dyn/static':>10} "
-        f"{'vs dense':>9} {'swap early':>10} {'swap late':>10}  {'gate'}"
+    print(
+        "  ledger (SPEC.md §2): B/wt = mosaic+dictionary bytes per weight; "
+        "mem_x = factor vs dense\n"
+        f"  fp32 ({DENSE_BYTES_PER_WEIGHT:.0f} B/wt). B/wt_inf is the N->inf asymptote. "
+        "loss/dns is a LOSS ratio, not memory."
     )
+
+    header = f"{'S':>2} {'K':>5} {'K/M':>7} {'B/wt':>6} {'mem_x':>6}"
+    if show_drift_cols:
+        header += f" {'Bwt_dft':>7} {'mem_x':>6}"
+    header += f" {'B/wt_inf':>8}"
+    for a in arms:
+        header += f" {a[:9]:>9}"
+    for a in arms[1:]:
+        header += f" {(a[:5] + '/ctl'):>9}"
+    header += f" {'loss/dns':>8}  {'best':<12}"
     print(header)
     print("-" * len(header))
 
-    passed, failed = 0, 0
-    representative = None  # (S, K, swap_history) for the largest K, kept for the curve below
-    start = time.time()
-    for S in S_values:
-        for K in K_values:
-            static_loss, _ = train_momos(
-                task, S, K, steps, batch, seq_len, seed, learning_rate,
-                subset_size=0, margin=margin, n_neighbors=n_neighbors,
-                maintenance_every=maintenance_every,
-            )
-            dynamic_loss, swap_history = train_momos(
-                task, S, K, steps, batch, seq_len, seed, learning_rate,
-                subset_size=subset_size, margin=margin, n_neighbors=n_neighbors,
-                maintenance_every=maintenance_every,
-            )
-            ratio = dynamic_loss / static_loss
-            gate_ok = dynamic_loss < static_loss
-            passed, failed = (passed + 1, failed) if gate_ok else (passed, failed + 1)
+    wins = {a: 0 for a in arms[1:]}
+    total_evaluated = 0
+    trace_data = []
+    start_time = time.time()
 
-            n = len(swap_history)
-            early = float(np.mean(swap_history[: max(n // 5, 1)])) if n else float("nan")
-            late = float(np.mean(swap_history[-max(n // 5, 1):])) if n else float("nan")
+    for S in [int(v) for v in gate.s]:
+        M = math.ceil(n_mosaicked / S)
+        for K in [int(v) for v in gate.k]:
+            km_ratio = K / M
+            bw_base, mem_base, bw_drift, mem_drift, bw_asym = _cell_ledger(
+                n_mosaicked, S, K, max_cohort_frac
+            )
 
+            # Regime requirement (SPEC_PHASE_C2.md §8): skip any cell with K >= M/10
+            if K >= M / 10:
+                print(
+                    f"{S:>2} {K:>5} {km_ratio:>7.2%} "
+                    f"SKIPPED (K >= M/10: degenerate / out of regime)",
+                    flush=True,
+                )
+                continue
+
+            # Compression requirement (SPEC.md §2.1): below the crossover N the
+            # dictionary does not amortise and the compressed model's persistent
+            # memory meets or exceeds dense fp32 — measuring there is meaningless.
+            if bw_drift >= DENSE_BYTES_PER_WEIGHT:
+                print(
+                    f"{S:>2} {K:>5} {km_ratio:>7.2%} "
+                    f"SKIPPED (no compression: {bw_drift:.2f} B/wt >= "
+                    f"{DENSE_BYTES_PER_WEIGHT:.1f} dense; "
+                    f"crossover needs N > {12 * K * S / (12 - bw_asym):.0f}, have {n_mosaicked})",
+                    flush=True,
+                )
+                continue
+
+            total_evaluated += 1
             print(
-                f"{S:>2} {K:>6} {static_loss:>10.5f} {dynamic_loss:>10.5f} "
-                f"{ratio:>9.2f}x {dynamic_loss / dense_loss:>8.2f}x "
-                f"{early:>10.3f} {late:>10.3f}  {'PASS' if gate_ok else 'FAIL'}"
+                f"Running cell S={S} K={K} (K/M={km_ratio:.2%}, "
+                f"{bw_base:.3f} B/wt = {mem_base:.1f}x dense)...",
+                flush=True,
             )
 
-            if representative is None or K >= representative[1]:
-                representative = (S, K, swap_history)
-    elapsed = time.time() - start
+            losses: Dict[str, float] = {}
+            swaps: Dict[str, List[float]] = {}
+            spreads: Dict[str, List[float]] = {}
+            for a in arms:
+                losses[a], swaps[a], spreads[a] = train_momos(
+                    task, S, K, methods[a], steps, batch, seq_len, seed, learning_rate
+                )
 
+            best = min(arms, key=lambda a: losses[a])
+            for a in arms[1:]:
+                if losses[a] < losses[control]:
+                    wins[a] += 1
+
+            row = f"{S:>2} {K:>5} {km_ratio:>7.2%} {bw_base:>6.3f} {mem_base:>5.1f}x"
+            if show_drift_cols:
+                row += f" {bw_drift:>7.3f} {mem_drift:>5.1f}x"
+            row += f" {bw_asym:>8.3f}"
+            for a in arms:
+                row += f" {losses[a]:>9.5f}"
+            for a in arms[1:]:
+                row += f" {losses[a] / losses[control]:>8.2f}x"
+            row += f" {losses[best] / dense_loss:>7.2f}x  {best:<12}"
+            print(row, flush=True)
+
+            trace_data.append((S, K, swaps, spreads))
+
+    elapsed = time.time() - start_time
     print()
-    print(f"gate: {passed}/{passed + failed} cells had dynamic beat static "
-          f"(dynamic loss < static loss)")
-    if failed:
-        print(
-            "NOT a universal pass. SPEC.md §8's Phase C gate is per-config, and a "
-            "negative result here is the falsification the gate is designed to catch — "
-            "see the script's final printed verdict / the report for the reading."
-        )
+    print("-" * 80)
+    print("Summary:")
+    for a in arms[1:]:
+        print(f"  {a} beat {control} : {wins[a]}/{total_evaluated} cells")
+    print(f"  Wall-clock time   : {elapsed:.1f}s on {jax.devices()[0].platform}")
+    print("-" * 80, flush=True)
 
-    if representative is not None:
-        S, K, swap_history = representative
-        buckets = _bucket_means(swap_history)
-        print()
-        print(f"swap rate over training, S={S} K={K} (mean per decile of steps):")
-        if buckets:
-            print("  " + "  ".join(f"{b:.3f}" for b in buckets))
+    for S, K, swaps, spreads in trace_data:
+        print(f"\n[Trace S={S}, K={K}]")
+        for a in arms:
+            if swaps.get(a):
+                vals = swaps[a]
+                # Per-step arms produce one value per step; windowed arms produce
+                # one per window, which is already short enough to print raw.
+                shown = _bucket_means(vals, n_buckets=6) if len(vals) > 12 else vals
+                print(f"  {a:<8} swap_rate : " + "  ".join(f"{b:.3f}" for b in shown))
+            if spreads.get(a):
+                print(f"  {a:<8} spread    : " + "  ".join(f"{b:.3f}" for b in spreads[a]))
+    sys.stdout.flush()
+
+
+CONFIG_DIR = str(Path(__file__).resolve().parent.parent / "src" / "config")
+
+
+@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config_momos")
+def main(cfg: DictConfig) -> None:
+    # Each arm reads its own momos/*.yaml. The arm that matches the selected
+    # `momos` group uses the composed cfg.momos instead of the file, so CLI
+    # overrides (`momos=drift momos.eval_window=5`) actually reach the run.
+    methods: Dict[str, DictConfig] = {}
+    for arm in [str(a) for a in cfg.gate.arms]:
+        if str(cfg.momos.method) == arm:
+            methods[arm] = cfg.momos
         else:
-            print("  (no swaps recorded — subset_size may be 0)")
+            path = Path(CONFIG_DIR) / "momos" / f"{arm}.yaml"
+            if not path.exists():
+                raise FileNotFoundError(
+                    f"gate.arms lists {arm!r} but {path} does not exist. "
+                    f"Available: {sorted(q.stem for q in path.parent.glob('*.yaml'))}"
+                )
+            methods[arm] = OmegaConf.load(path)
 
-    print()
-    print(f"wall clock: {elapsed:.1f}s on {jax.devices()[0].platform}")
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--task", default="cumsum", choices=sorted(toy_tasks.TASKS))
-    parser.add_argument("--s", type=int, nargs="+", default=[1, 2, 4])
-    parser.add_argument("--k", type=int, nargs="+", default=[256, 1024, 4096])
-    parser.add_argument("--steps", type=int, default=300)
-    parser.add_argument("--batch", type=int, default=32)
-    parser.add_argument("--seq-len", type=int, default=32)
-    parser.add_argument("--learning-rate", type=float, default=6e-3)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--subset-size", type=int, default=64,
-                         help="blocks examined for reassignment per step (Phase C's dynamic run)")
-    parser.add_argument(
-        "--margin", type=float, default=1e-6,
-        help="hysteresis threshold; measured empirically to sit near "
-             "(learning_rate)^2 in scale (a single Adam step's squared magnitude), "
-             "so --margin should shrink with --learning-rate or swaps stop firing "
-             "at all — see the report for how this was found.",
-    )
-    parser.add_argument("--n-neighbors", type=int, default=8)
-    parser.add_argument("--maintenance-every", type=int, default=20,
-                         help="steps between neighbour-graph rebuilds")
-    args = parser.parse_args()
-
-    run_gate(
-        task=args.task, S_values=args.s, K_values=args.k, steps=args.steps,
-        batch=args.batch, seq_len=args.seq_len, seed=args.seed,
-        learning_rate=args.learning_rate, subset_size=args.subset_size,
-        margin=args.margin, n_neighbors=args.n_neighbors,
-        maintenance_every=args.maintenance_every,
-    )
+    run_gate(cfg.gate, methods)
 
 
 if __name__ == "__main__":
