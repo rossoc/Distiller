@@ -457,9 +457,26 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     trace_data = []
     start_time = time.time()
 
-    for S in [int(v) for v in gate.s]:
+    # Explicit (S, K) pairs override the s x k cross product when gate.cells is
+    # set. Kept as a nested loop over single-element K lists so the cell body
+    # below is untouched by this branch.
+    if gate.get("cells") is not None and len(gate.cells) > 0:
+        cell_pairs: List[Tuple[int, int]] = []
+        for item in gate.cells:
+            if isinstance(item, str):
+                sep = next((c for c in ":/," if c in item), None)
+                if sep is None:
+                    raise ValueError(f"Cannot parse cell {item!r}; expected 'S:K' or [S, K]")
+                parts = item.split(sep)
+                cell_pairs.append((int(parts[0]), int(parts[1])))
+            else:
+                cell_pairs.append((int(item[0]), int(item[1])))
+    else:
+        cell_pairs = [(int(s), int(k)) for s in gate.s for k in gate.k]
+
+    for S, _k_list in ((s, [k]) for s, k in cell_pairs):
         M = math.ceil(n_mosaicked / S)
-        for K in [int(v) for v in gate.k]:
+        for K in _k_list:
             km_ratio = K / M
             bw_base, mem_base, bw_drift, mem_drift, bw_asym = _cell_ledger(
                 n_mosaicked, S, K, max_cohort_frac

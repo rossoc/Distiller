@@ -19,6 +19,12 @@ task: cumsum
 s: [1, 2, 4]
 k: [256, 1024, 4096]
 
+# Explicit (S, K) pairs, overriding the `s` x `k` cross product above when set.
+# Each item is 'S:K' (also accepts 'S/K', 'S,K', or [S, K]); parsed in
+# momos_phase_c.run_gate. Null means "use the cross product".
+#   python scripts/momos_phase_c.py "gate.cells=['1:1024','2:1024','4:256']"
+cells: null
+
 steps: 300
 batch: 32
 seq_len: 32
