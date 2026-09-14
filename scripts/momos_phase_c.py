@@ -103,6 +103,7 @@ def _mosaic_config(
     K: int,
     learning_rate: float,
     reserve_zero_motif: Optional[bool] = None,
+    dedup_init: Optional[bool] = None,
 ) -> MosaicConfig:
     """Build a MosaicConfig from one ``momos/*.yaml`` group.
 
@@ -117,18 +118,41 @@ def _mosaic_config(
     kwargs.update(S=S, K=K, base_lr=learning_rate)
     if reserve_zero_motif is not None:
         kwargs["reserve_zero_motif"] = reserve_zero_motif
+    if dedup_init is not None:
+        kwargs["dedup_init"] = dedup_init
     return MosaicConfig(**kwargs)
 
 
 class MomosResult(tuple):
-    """6-tuple return for train_momos with extra usage_0 attributes for P1."""
+    """6-tuple return for train_momos with extra attributes for P1 and D3.
+
+    ``final_motifs``/``final_mosaic`` are the raw arrays behind the summary
+    stats already in the tuple (``live``, ``entropy``, ...) -- kept off the
+    tuple itself (SPEC_PHASE_D_DEFECTS.md §D3: exposing them as attributes,
+    not new positional elements, keeps every existing
+    ``loss, swaps, spreads, live, entropy, lifecycle_history = train_momos(...)``
+    unpack working unchanged) so a state-equality test can check them at
+    ``atol=0`` without depending on derived metrics that can mask a state
+    difference too small to move loss/live/entropy.
+    """
     usage_0: int
     usage_0_frac: float
+    final_motifs: Any
+    final_mosaic: Any
 
-    def __new__(cls, values, usage_0: int = 0, usage_0_frac: float = 0.0):
+    def __new__(
+        cls,
+        values,
+        usage_0: int = 0,
+        usage_0_frac: float = 0.0,
+        final_motifs: Any = None,
+        final_mosaic: Any = None,
+    ):
         t = super().__new__(cls, values)
         t.usage_0 = usage_0
         t.usage_0_frac = usage_0_frac
+        t.final_motifs = final_motifs
+        t.final_mosaic = final_mosaic
         return t
 
 
@@ -143,6 +167,7 @@ def train_momos(
     seed: int,
     learning_rate: float,
     reserve_zero_motif: Optional[bool] = None,
+    dedup_init: Optional[bool] = None,
 ) -> Any:
     """Train one arm, whose knobs come entirely from a ``momos/*.yaml`` group.
 
@@ -160,7 +185,12 @@ def train_momos(
     flat, layout = tiling.flatten_params(param_state, include=tiling.default_include)
     M = math.ceil(layout.n_values / S)
     cfg = _mosaic_config(
-        method, S=S, K=K, learning_rate=learning_rate, reserve_zero_motif=reserve_zero_motif
+        method,
+        S=S,
+        K=K,
+        learning_rate=learning_rate,
+        reserve_zero_motif=reserve_zero_motif,
+        dedup_init=dedup_init,
     )
     arm = str(method.method)
     maint_every = int(method.maintenance_every)
@@ -262,7 +292,7 @@ def train_momos(
         jit_core_single = jax.jit(core_single)
 
         graph = None
-        if cfg.subset_size > 0 and arm in ("single", "lifecycle"):
+        if cfg.subset_size > 0:
             graph = maintenance.neighbour_graph(state.motifs, state.active, cfg.n_neighbors)
 
         fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
@@ -273,13 +303,12 @@ def train_momos(
             x, y, w = make_batch(sub, batch, seq_len)
             fields, _, swap_rate = jit_core_single(*fields, graph, step_rng, x, y, w)
 
-            if arm in ("single", "lifecycle"):
+            if cfg.subset_size > 0:
                 swap_history.append(float(swap_rate))
                 if maint_every > 0 and (step + 1) % maint_every == 0:
                     maint_pass = (step + 1) // maint_every
                     if (
-                        arm == "lifecycle"
-                        and cfg.lifecycle_every > 0
+                        cfg.lifecycle_every > 0
                         and (maint_pass % cfg.lifecycle_every == 0)
                     ):
                         cur_state = MosaicState(
@@ -292,7 +321,7 @@ def train_momos(
                             cfg=cfg,
                             graph=graph,
                         )
-                        cur_state, pass_metrics = lifecycle_pass(cur_state, step=step)
+                        cur_state, pass_metrics = lifecycle_pass(cur_state)
                         fields = (
                             cur_state.motifs,
                             cur_state.mosaic,
@@ -324,6 +353,8 @@ def train_momos(
         (eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history),
         usage_0=u0_count,
         usage_0_frac=u0_frac,
+        final_motifs=final_state.motifs,
+        final_mosaic=final_state.mosaic,
     )
 
 
@@ -431,6 +462,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     )
 
     gate_rzm = bool(gate.get("reserve_zero_motif", False))
+    gate_dedup = bool(gate.get("dedup_init", False))
     show_u0 = (
         gate_rzm
         or bool(gate.get("show_u0", False))
@@ -517,6 +549,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                 per_seed_results[s] = {}
                 for a in arms:
                     arm_rzm = gate_rzm or bool(methods[a].get("reserve_zero_motif", False))
+                    arm_dedup = gate_dedup or bool(methods[a].get("dedup_init", False))
                     res = train_momos(
                         task,
                         S,
@@ -528,6 +561,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                         s,
                         learning_rate,
                         reserve_zero_motif=arm_rzm,
+                        dedup_init=arm_dedup,
                     )
                     per_seed_results[s][a] = res
 

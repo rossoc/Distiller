@@ -36,6 +36,7 @@ config reaches them through ``${training.*}`` interpolation).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 import time
@@ -58,6 +59,8 @@ from model_jax.batching import bucket_ladder, describe_ladder, to_jax_batch
 from model_jax.donor_projection import load_donor_tables
 from model_jax.factory import DEFAULT_KIND, build_model
 from model_jax.mimir_mamba2 import param_group
+from model_jax.momos import integration as momos_integration
+from model_jax.momos.state import MosaicConfig
 from utils import dataloader_runtime, format_seconds
 
 log = logging.getLogger(__name__)
@@ -194,6 +197,23 @@ def build_optimizer(
     return tx, labels
 
 
+_MOSAIC_CONFIG_FIELDS = {f.name for f in dataclasses.fields(MosaicConfig)}
+
+
+def _momos_config_from_cfg(momos_cfg: DictConfig) -> MosaicConfig:
+    """Build a ``MosaicConfig`` from ``cfg.momos_backbone``.
+
+    Forwards only real ``MosaicConfig`` fields, so ``momos_backbone``'s yaml
+    can carry knobs that are not dataclass fields (``dict_lr_mult``,
+    ``enabled``) without a filter list here going stale every time SPEC adds
+    a field — the same pattern ``scripts/momos_phase_c.py``'s
+    ``_mosaic_config`` already uses for the gate script's own config groups.
+    """
+    raw = OmegaConf.to_container(momos_cfg, resolve=True)
+    kwargs = {k: v for k, v in raw.items() if k in _MOSAIC_CONFIG_FIELDS}
+    return MosaicConfig(**kwargs)
+
+
 def _label_tree(params):
     """Map every parameter path to its optimiser-group name."""
     flat = nnx.to_flat_state(params)
@@ -303,6 +323,18 @@ def run_fold(
     steps_per_epoch = max(len(train_dl) // grad_accum, 1)
     total_steps = max(steps_per_epoch * num_epochs, 1)
 
+    momos_cfg_dc = cfg.get("momos_backbone")
+    momos_enabled = bool(momos_cfg_dc.enabled) if momos_cfg_dc is not None else False
+    if momos_enabled:
+        return _run_momos_fold(
+            cfg, fold_idx, seed, model, momos_cfg_dc,
+            train_dl, val_dl, prepare=lambda batch, size: sharding_lib.shard_batch(
+                mesh, to_jax_batch(batch, ladder, size, pad_token_id)
+            ),
+            train_batch=train_batch, eval_batch=eval_batch,
+            num_epochs=num_epochs, total_steps=total_steps, trial=trial,
+        )
+
     params = nnx.state(model, nnx.Param)
     tx, _labels = build_optimizer(
         params,
@@ -408,6 +440,145 @@ def run_fold(
 
     elapsed = format_seconds(time.time() - start)
     log.info("  fold done in %s — val_loss=%.4f", elapsed, best)
+    return best
+
+
+def _run_momos_fold(
+    cfg: DictConfig,
+    fold_idx: int,
+    seed: int,
+    model: nnx.Module,
+    momos_cfg_dc: DictConfig,
+    train_dl,
+    val_dl,
+    *,
+    prepare,
+    train_batch: int,
+    eval_batch: int,
+    num_epochs: int,
+    total_steps: int,
+    trial: Optional[optuna.Trial],
+) -> float:
+    """The MoMos-enabled counterpart of ``run_fold``'s optimiser/loop section
+    (SPEC_PHASE_E.md). Kept as a separate function rather than branching
+    inline throughout ``run_fold`` so the dense path above is untouched code,
+    not code now living inside an ``if``/``else`` — enabling MoMos can only
+    ever be reached by explicitly setting ``momos_backbone.enabled: true``.
+
+    Checkpoints the *reconstructed dense* params (``integration.merged_model``),
+    not the compact dictionary — so anything downstream that loads a
+    checkpoint (``predict.py``, ``model_jax/export.py``) keeps working
+    unchanged. Saving the compact representation instead is real future
+    work (it is the actual memory win the dictionary exists for) but is not
+    part of this landing; see ``SPEC_PHASE_PERF.md``.
+    """
+    training = cfg.training
+    momos_cfg = _momos_config_from_cfg(momos_cfg_dc)
+    log.info(
+        "Fold %d: MoMos backbone enabled — S=%d K=%d scale_mode=%s subset_size=%d "
+        "(SPEC_PHASE_E.md)",
+        fold_idx, momos_cfg.S, momos_cfg.K, momos_cfg.scale_mode, momos_cfg.subset_size,
+    )
+
+    base_schedule = build_schedule(
+        str(training.lr_scheduler), float(training.learning_rate), total_steps, float(training.warmup_ratio)
+    )
+    dict_schedule = build_schedule(
+        str(training.lr_scheduler),
+        float(training.learning_rate) * float(momos_cfg_dc.get("dict_lr_mult", 1.0)),
+        total_steps,
+        float(training.warmup_ratio),
+    )
+    dict_optimizer = optax.adam(dict_schedule)
+    # Every leaf tiling.default_include excludes on this architecture
+    # (A_log, D, dt_bias, norm weights) is the "body_no_decay" group under
+    # mimir_mamba2.param_group — see SPEC_PHASE_E.md — so one optimiser, not
+    # train_jax's usual four-group multi_transform, is correct here. That
+    # grouping does not generalise as-is to a model whose excluded leaves
+    # aren't all no-decay/body; this integration has only been built and
+    # tested against MimirMamba2Model.
+    excluded_optimizer = optax.adamw(base_schedule, weight_decay=0.0)
+
+    def momos_loss_fn(m, batch):
+        return m.loss(batch["input_ids"], batch["labels"], batch["attention_mask"])
+
+    bundle = momos_integration.init_bundle(
+        model, momos_cfg, dict_optimizer, excluded_optimizer, jax.random.PRNGKey(seed)
+    )
+    n_mosaicked = bundle.mosaic.layout.n_values
+    log.info("MoMos: %d values mosaicked into K=%d motifs (S=%d)", n_mosaicked, momos_cfg.K, momos_cfg.S)
+
+    core_step = momos_integration.make_jit_step(
+        bundle.mosaic.layout, bundle.mosaic.cfg, bundle.graphdef,
+        momos_loss_fn, dict_optimizer, excluded_optimizer,
+    )
+    core_eval = momos_integration.make_jit_eval(
+        bundle.mosaic.layout, bundle.mosaic.cfg, bundle.graphdef, momos_loss_fn
+    )
+    arrays = list(momos_integration.bundle_arrays(bundle))
+
+    def evaluate(current_arrays) -> float:
+        motifs, mosaic_idx, active, scales, _opt_state, excluded, _excl_opt_state, rest = current_arrays
+        total, count = 0.0, 0
+        for batch in val_dl:
+            loss = float(
+                core_eval(motifs, mosaic_idx, active, scales, excluded, rest, prepare(batch, eval_batch))
+            )
+            if math.isfinite(loss):
+                total += loss
+                count += 1
+        return total / count if count else float("inf")
+
+    manager = make_checkpoint_manager(
+        str(Path(training.output_dir) / f"fold_{fold_idx}"), enabled=trial is None
+    )
+    best = float("inf")
+    start = time.time()
+    global_step = 0
+    rng = jax.random.PRNGKey(seed + 1)
+
+    try:
+        for epoch in range(num_epochs):
+            running, seen = 0.0, 0
+            for batch in train_dl:
+                rng, sub = jax.random.split(rng)
+                *arrays, loss, _swap = core_step(*arrays, sub, prepare(batch, train_batch))
+                running += float(loss)
+                seen += 1
+                global_step += 1
+
+            eval_loss = evaluate(arrays)
+            train_loss = running / seen if seen else float("nan")
+            log.info(
+                "epoch %d/%d — train_loss=%.4f eval_loss=%.4f (momos)",
+                epoch + 1, num_epochs, train_loss, eval_loss,
+            )
+
+            if eval_loss < best:
+                best = eval_loss
+                if manager is not None:
+                    final_bundle = momos_integration.bundle_from_arrays(
+                        tuple(arrays),
+                        layout=bundle.mosaic.layout, cfg=bundle.mosaic.cfg, graphdef=bundle.graphdef,
+                    )
+                    merged = momos_integration.merged_model(final_bundle)
+                    manager.save(
+                        global_step,
+                        args=ocp.args.StandardSave(jax.tree.map(np.asarray, nnx.state(merged, nnx.Param))),
+                        metrics={"eval_loss": eval_loss},
+                    )
+
+            if trial is not None:
+                trial.report(eval_loss, epoch)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+    finally:
+        if manager is not None:
+            manager.wait_until_finished()
+            manager.close()
+
+    elapsed = format_seconds(time.time() - start)
+    log.info("  fold done in %s — val_loss=%.4f (momos)", elapsed, best)
     return best
 
 

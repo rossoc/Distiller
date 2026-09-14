@@ -129,7 +129,7 @@ def test_no_block_points_at_a_dead_motif():
         cfg=cfg,
     )
 
-    new_state, pass_metrics = lifecycle_pass(state, step=1)
+    new_state, pass_metrics = lifecycle_pass(state)
 
     assert pass_metrics.n_merged >= 2, "Expected at least 2 merges"
     assert pass_metrics.n_dropped >= 1, "Expected at least 1 drop"
@@ -220,6 +220,36 @@ def test_clique_collapses_to_one_component():
     np.testing.assert_array_equal(new_mosaic, np.zeros((M,), dtype=mosaic.dtype))
 
 
+def test_merge_thr_reports_real_threshold_when_floor_saturates():
+    """SPEC_PHASE_D_DEFECTS.md §D6: a saturated min_live_frac floor reports the
+    computed thr, not 0.0 -- 0.0 is indistinguishable from a degenerate
+    dictionary, which is a different failure mode than a floor binding on
+    real candidates at a real threshold."""
+    S, K, M = 1, 4, 8
+    motifs = np.array([[0.0], [0.0005], [0.0006], [50.0]], dtype=np.float32)
+    mosaic = np.array([0, 1, 2, 3] * (M // 4), dtype=mosaic_dtype(K))
+    active = np.ones((K,), dtype=bool)
+    scale = merge_scale(motifs, active)
+
+    # min_live_frac=1.0 forces budget=0 (min_live == K == live_count) while
+    # motifs 0/1/2 are well within merge_eps*scale of each other, so
+    # candidate_d is non-empty -- exactly the clamped-with-candidates case.
+    cfg = MosaicConfig(
+        S=S, K=K, scale_mode="none",
+        merge_quantile=0.0, merge_eps=0.01, min_live_frac=1.0, n_neighbors=3,
+    )
+    new_mosaic, new_active, n_merged, merge_thr, floor_clamped = merge_step(
+        motifs, mosaic, active, scale, cfg
+    )
+
+    assert floor_clamped is True
+    assert n_merged == 0
+    np.testing.assert_array_equal(new_mosaic, mosaic)
+    assert bool(np.all(new_active))
+    assert merge_thr == pytest.approx(cfg.merge_eps * scale)
+    assert merge_thr > 0.0
+
+
 # ---------------------------------------------------------------------------
 # Invariant 3: Mosaic dtype survives
 # ---------------------------------------------------------------------------
@@ -258,7 +288,7 @@ def test_mosaic_dtype_survives():
         )
 
         assert state.mosaic.dtype == expected_dtype
-        new_state, _ = lifecycle_pass(state, step=0)
+        new_state, _ = lifecycle_pass(state)
         assert new_state.mosaic.dtype == expected_dtype
         assert isinstance(new_state.mosaic, jnp.ndarray)
 
@@ -303,7 +333,7 @@ def test_monotonicity():
     prev_live = metrics.live_motifs(cur_state)
 
     for step in range(6):
-        cur_state, met = lifecycle_pass(cur_state, step=step)
+        cur_state, met = lifecycle_pass(cur_state)
         cur_live = metrics.live_motifs(cur_state)
         assert cur_live <= prev_live, (
             f"Pass {step} increased live count: {cur_live} > {prev_live}"
@@ -354,7 +384,7 @@ def test_the_floor_holds():
 
     cur_state = state
     for step in range(8):
-        cur_state, met = lifecycle_pass(cur_state, step=step)
+        cur_state, met = lifecycle_pass(cur_state)
         live = metrics.live_motifs(cur_state)
         assert live >= floor, f"Pass {step}: live {live} fell below floor {floor}"
         assert live > 0, "active.sum() reached 0"
@@ -401,7 +431,7 @@ def test_lifecycle_every_zero_is_bit_for_bit_phase_c():
         "min_live_frac": 0.25,
     })
 
-    loss_s, _, _, live_s, ent_s, _ = gate.train_momos(
+    res_s = gate.train_momos(
         task="cumsum",
         S=2,
         K=64,
@@ -412,7 +442,7 @@ def test_lifecycle_every_zero_is_bit_for_bit_phase_c():
         seed=123,
         learning_rate=6e-3,
     )
-    loss_l, _, _, live_l, ent_l, _ = gate.train_momos(
+    res_l = gate.train_momos(
         task="cumsum",
         S=2,
         K=64,
@@ -423,10 +453,21 @@ def test_lifecycle_every_zero_is_bit_for_bit_phase_c():
         seed=123,
         learning_rate=6e-3,
     )
+    loss_s, _, _, live_s, ent_s, _ = res_s
+    loss_l, _, _, live_l, ent_l, _ = res_l
 
     assert loss_s == pytest.approx(loss_l, abs=0.0)
     assert live_s == live_l
     assert ent_s == pytest.approx(ent_l, abs=0.0)
+
+    # SPEC_PHASE_D_DEFECTS.md §D3: the derived stats above (loss/live/entropy)
+    # can agree even if the underlying dictionary/mosaic differ, so this is
+    # the invariant's real assertion -- SPEC_PHASE_D.md §7.6 requires the
+    # final arrays themselves to match at atol=0, and a bug that still calls
+    # lifecycle_pass despite lifecycle_every=0 would perturb these even when
+    # it happens not to move the summary metrics.
+    np.testing.assert_array_equal(np.asarray(res_s.final_motifs), np.asarray(res_l.final_motifs))
+    np.testing.assert_array_equal(np.asarray(res_s.final_mosaic), np.asarray(res_l.final_mosaic))
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """MoMos: weight compression by dictionary learning. See ``SPEC.md``.
 
-This package currently implements Phases A, B and C — flat/global tiling,
-dictionary state, the static-mosaic micro-loop, and dynamic swapping (the
-exact neighbour graph plus the micro-loop's step D). Lifecycle (Phase D) and
-the Mamba2 backbone integration (Phase E) are not implemented.
+This package implements Phases A-E: flat/global tiling, dictionary state,
+the static-mosaic micro-loop, dynamic swapping (exact neighbour graph plus
+the micro-loop's step D), lifecycle (drop/merge), and — via
+``model_jax.momos.integration`` — wiring the dictionary onto a real
+``nnx.Module`` (the Mamba2 backbone) rather than only the toy SSM harness.
 """
 
 from model_jax.momos.codebook import (
@@ -21,6 +22,8 @@ from model_jax.momos.drift import (
     init_drift_state,
     pick_coprime,
 )
+from model_jax.momos.integration import ModelBundle, init_bundle, merged_model
+from model_jax.momos.integration import step as integration_step
 from model_jax.momos.maintenance import neighbour_graph
 from model_jax.momos.metrics import (
     bytes_per_weight,
@@ -57,6 +60,7 @@ from model_jax.momos.train_step import reconstruct, train_step
 __all__ = [
     "DENSE_BYTES_PER_WEIGHT",
     "DriftState",
+    "ModelBundle",
     "MosaicConfig",
     "MosaicState",
     "ParamLayout",
@@ -76,11 +80,14 @@ __all__ = [
     "from_blocks",
     "include_everything",
     "init",
+    "init_bundle",
     "init_drift_state",
+    "integration_step",
     "jump_eligible_rate",
     "live_motifs",
     "macro_reassign",
     "matched_rate",
+    "merged_model",
     "mosaic_dtype",
     "neighbour_graph",
     "pick_coprime",

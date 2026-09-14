@@ -543,6 +543,55 @@ is the failure mode to watch for.
 the K slots is reserved rather than added.
 
 
+---
+
+# Phase D verdict (post D3–D8, post F1/F2)
+
+D3–D8 are fixed (all standalone, no dose recalibration needed — D1/D2 were
+already fixed earlier in this working tree). Full suite: 120/122 passing; the
+2 failures (`test_lifecycle_every_zero_is_bit_for_bit_phase_c`,
+`test_cohort_frac_zero_reproduces_phase_b_bit_for_bit`) are pre-existing
+GPU/XLA float32 reassociation flakes, reproduced identically on a clean `main`
+via `git stash` before any of this work — not a regression.
+
+**F2** (dedup-at-init control, S=1 only): dedup dramatically improved
+`static`/`single` (up to 5.6x at K=1024) but improved `lifecycle` far less,
+flipping the S=1/K=1024 ranking from lifecycle-wins to single-wins.
+
+**F1 re-run with `dedup_init=true`** (all three original F1 cells, 3 seeds each):
+
+| Cell | static | single | lifecycle | best | verdict |
+|---|---|---|---|---|---|
+| S=1/K=1024 | 0.00430 | 0.00525 ± 0.00185 | 0.00532 ± 0.00127 | static | INCONCLUSIVE (gap 0.00007) |
+| S=2/K=1024 | 0.00500 | 0.00418 ± 0.00032 | 0.00481 ± 0.00460 | single | INCONCLUSIVE (gap 0.00063) |
+| S=4/K=256  | 0.00692 | 0.00457 ± 0.00156 | 0.01085 ± 0.00772 | single | INCONCLUSIVE (gap 0.00629) |
+
+Every cell is still formally INCONCLUSIVE by F1's spread-vs-gap rule. But the
+means are decisive in direction: `single` beats `lifecycle` in **all three**
+cells post-dedup (it did not pre-dedup — lifecycle had the edge at S=1/K=1024
+and S=2/K=1024 in the original 3-seed run), and at S=4/K=256 `lifecycle` is now
+the worst arm by a wide margin (1.57x worse than static, vs single's 0.66x).
+`lifecycle` beats `static` in only 1/3 cells; `single` beats `static` in 2/3.
+
+**Verdict: Phase D is recorded as NOT PASSED.** Once the init-duplication
+confound (F2's hypothesis #2) is controlled for, the lifecycle merge/drop
+machinery shows no measured edge over the much simpler per-step `single` swap
+rule, and actively underperforms it at S=4/K=256. The mechanism is implemented
+correctly (D1–D8 fixed, unit-tested, invariants hold) but has not demonstrated
+value in this regime. Further `merge_quantile`/`merge_eps` tuning is not
+recommended until a cell shows a gap that survives more seeds — S=4/K=256 is
+the closest (spread 0.00772 vs gap 0.00629) and the cheapest place to add
+seeds if this is revisited.
+
+**Next SPEC phase:** Phase E (Mamba2 backbone integration) is unblocked
+either way — lifecycle is opt-in (`lifecycle_every: 0` disables it, reducing
+to `single`), so Phase E does not depend on this verdict. Work continuing
+after this point ([[momos-memory-efficiency]] below) targets inference/training
+memory rather than Phase E or further lifecycle tuning, per explicit user
+redirection.
+
+---
+
 ## Verified clean — do not re-investigate
 
 The review checked and confirmed these hold; they are recorded so the next pass

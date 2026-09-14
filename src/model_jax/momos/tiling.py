@@ -33,7 +33,7 @@ strictly better for the scale machinery, so that is what this implements.
 from __future__ import annotations
 
 import dataclasses
-from typing import Callable, Tuple
+from typing import Callable, Optional, Sequence, Tuple
 
 import jax.numpy as jnp
 import numpy as np
@@ -74,7 +74,7 @@ def default_include(path: Path) -> bool:
         return False
     if leaf == "weight" and len(path) >= 2 and path[-2] == "norm":
         return False
-    if path == ("norm_f", "weight"):
+    if leaf == "weight" and len(path) >= 2 and path[-2] == "norm_f":
         return False
     return True
 
@@ -172,7 +172,11 @@ def flatten_params(
     return flat, layout
 
 
-def unflatten_params(flat: jnp.ndarray, layout: ParamLayout) -> nnx.State:
+def unflatten_params(
+    flat: jnp.ndarray,
+    layout: ParamLayout,
+    excluded_values: Optional[Sequence[jnp.ndarray]] = None,
+) -> nnx.State:
     """Exact inverse of :func:`flatten_params`: reassemble the parameter tree.
 
     Casts each leaf back to its recorded dtype explicitly rather than relying
@@ -180,8 +184,21 @@ def unflatten_params(flat: jnp.ndarray, layout: ParamLayout) -> nnx.State:
     mixed-dtype leaves to a common type, so without this cast a tree that
     started with (say) a bfloat16 leaf would come back float32. Reshape/cast
     do no arithmetic, so this is exact regardless.
+
+    ``excluded_values``, if given, overrides ``layout.excluded``'s frozen
+    initial values, one-for-one in the same order — for a caller (e.g.
+    ``model_jax.momos.integration``) that trains the excluded leaves with an
+    ordinary optimiser alongside the dictionary, rather than leaving them
+    frozen at init (Phases A-D's behaviour, and still the default here: with
+    ``excluded_values=None`` this is bit-for-bit identical to before).
     """
-    items = [(path, nnx.Param(jnp.asarray(value))) for path, value in layout.excluded]
+    if excluded_values is None:
+        items = [(path, nnx.Param(jnp.asarray(value))) for path, value in layout.excluded]
+    else:
+        items = [
+            (path, nnx.Param(jnp.asarray(value)))
+            for (path, _), value in zip(layout.excluded, excluded_values)
+        ]
     for path, shape, dtype, offset in zip(
         layout.paths, layout.shapes, layout.dtypes, layout.offsets
     ):

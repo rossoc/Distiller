@@ -105,6 +105,57 @@ def test_reconstruct_applies_per_tensor_scale():
 # ---------------------------------------------------------------------------
 
 
+def test_reconstruct_exact_when_leaf_straddles_a_block_boundary():
+    """SPEC_PHASE_PERF.md §6 stage A: the lazy per-leaf gather must be exact
+    even when a leaf's value range does not align to a block boundary —
+    ``flatten_params`` does not actually pad each leaf to a multiple of ``S``
+    before concatenation (only the whole flat vector gets one trailing pad),
+    so this is the common case, not an edge case."""
+    K, S = 4, 2
+    motifs = jnp.array([[1.0, 1.0], [2.0, 2.0], [3.0, 3.0], [4.0, 4.0]])
+    # 7 values total: leaf "a" takes the first 5, leaf "b" the last 2 — block 2
+    # (values [4,5]) straddles both, block 0 and 1 belong wholly to "a", block
+    # 3 ([pad,pad] beyond n_values) is never read since "b" ends at value 7.
+    mosaic = jnp.array([0, 1, 2, 3], dtype=mosaic_dtype(K))
+    layout = tiling.ParamLayout(
+        paths=(("a",), ("b",)), shapes=((5,), (2,)), dtypes=(jnp.float32, jnp.float32),
+        offsets=(0, 5), n_values=7,
+        tensor_id=np.array([0, 0, 0, 0, 0, 1, 1], dtype=np.int32), excluded=(),
+    )
+    cfg = MosaicConfig(S=S, K=K, scale_mode="none")
+    state = MosaicState(
+        motifs=motifs, mosaic=mosaic, active=jnp.ones((K,), dtype=bool), scales=None,
+        opt_state=(), layout=layout, cfg=cfg,
+    )
+    params = reconstruct(state)
+    flat = dict(nnx.to_flat_state(params))
+    # dense reference: motifs[mosaic] flattened = [1,1, 2,2, 3,3, 4,4][:7]
+    np.testing.assert_allclose(np.asarray(flat[("a",)].get_value()), [1, 1, 2, 2, 3])
+    np.testing.assert_allclose(np.asarray(flat[("b",)].get_value()), [3, 4])
+
+
+def test_reconstruct_gather_dtype_casts_transient_only():
+    """``gather_dtype`` narrows the transient gather, not ``state.motifs`` or
+    the leaf's declared output dtype."""
+    K, S = 3, 1
+    motifs = jnp.array([[1.0], [2.0], [3.0]])
+    mosaic = jnp.array([0, 1, 2], dtype=mosaic_dtype(K))
+    layout = tiling.ParamLayout(
+        paths=(("w",),), shapes=((3,),), dtypes=(jnp.float32,), offsets=(0,),
+        n_values=3, tensor_id=np.zeros((3,), np.int32), excluded=(),
+    )
+    cfg = MosaicConfig(S=S, K=K, scale_mode="none")
+    state = MosaicState(
+        motifs=motifs, mosaic=mosaic, active=jnp.ones((K,), dtype=bool), scales=None,
+        opt_state=(), layout=layout, cfg=cfg,
+    )
+    params = reconstruct(state, gather_dtype=jnp.bfloat16)
+    w = dict(nnx.to_flat_state(params))[("w",)].get_value()
+    assert w.dtype == jnp.float32  # cast back to the leaf's declared dtype
+    np.testing.assert_allclose(np.asarray(w), [1, 2, 3])
+    assert state.motifs.dtype == jnp.float32  # source array untouched
+
+
 def _init_state(model, S, K, scale_mode="none", seed=0, learning_rate=1e-2):
     graphdef, param_state = _split(model)
     flat, layout = tiling.flatten_params(param_state, include=tiling.include_everything)

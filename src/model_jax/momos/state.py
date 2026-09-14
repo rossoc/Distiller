@@ -90,6 +90,9 @@ class MosaicConfig:
     min_live_frac: float = 0.25  # never merge below this fraction of K
     reserve_zero_motif: bool = False  # reserve motifs[0] = 0 as permanent zero motif (SPEC_PHASE_D_DEFECTS.md §P1)
 
+    # F2 control (SPEC_PHASE_D_DEFECTS.md §F2):
+    dedup_init: bool = False  # redraw near-duplicate seed motifs at init instead of leaving them
+
     def __post_init__(self) -> None:
         if self.S not in (1, 2, 4):
             raise ValueError(f"S must be 1, 2, or 4 (SPEC.md §1); got {self.S}")
@@ -145,6 +148,8 @@ class MosaicConfig:
             raise ValueError(f"min_live_frac must be in (0, 1], got {self.min_live_frac}")
         if not isinstance(self.reserve_zero_motif, bool):
             raise ValueError(f"reserve_zero_motif must be a bool, got {self.reserve_zero_motif!r}")
+        if not isinstance(self.dedup_init, bool):
+            raise ValueError(f"dedup_init must be a bool, got {self.dedup_init!r}")
 
 
 def mosaic_dtype(K: int) -> np.dtype:
@@ -198,6 +203,59 @@ def trainable(state: MosaicState) -> dict:
     return {"motifs": state.motifs, "scales": state.scales}
 
 
+def _dedup_seed_indices(
+    rng: np.random.Generator,
+    blocks_np: np.ndarray,
+    K: int,
+    rel_thresh: float = 1e-3,
+    max_iters: int = 50,
+) -> np.ndarray:
+    """Draw ``K`` seed indices into ``blocks_np`` with no near-duplicate pair.
+
+    F2 control (SPEC_PHASE_D_DEFECTS.md §F2): the plain seed in :func:`init`
+    samples ``K`` blocks uniformly, which at S=1 produces heavy clustering
+    purely from packing K points into a 1-D range (measured in
+    ``SPEC_PHASE_D.md`` §4.1: up to 94% of motifs within `1e-3` relative of a
+    neighbour at K=4096). This resamples any motif whose nearest neighbour,
+    relative to the RMS seed norm, is closer than ``rel_thresh`` — "simply
+    re-drawing duplicate motifs" per the spec's F2 recipe — so Phase D's
+    lifecycle merge is tested against an init that has not already handed it
+    an easy, one-time win.
+
+    Runs on the host in NumPy: it executes once, at init, same as the
+    lifecycle host pass (SPEC.md §6.2).
+    """
+    M = blocks_np.shape[0]
+    idx = rng.choice(M, size=K, replace=K > M)
+    if K < 2:
+        return idx
+
+    for _ in range(max_iters):
+        seeds = blocks_np[idx].astype(np.float64)
+        scale = float(np.sqrt(np.mean(np.sum(seeds**2, axis=-1))))
+        if scale == 0.0:
+            break
+        sq = np.sum(seeds**2, axis=-1)
+        d2 = sq[:, None] + sq[None, :] - 2.0 * (seeds @ seeds.T)
+        np.fill_diagonal(d2, np.inf)
+        d2 = np.maximum(d2, 0.0)
+        nn_d = np.sqrt(np.min(d2, axis=-1)) / scale
+        bad = nn_d < rel_thresh
+        if not np.any(bad):
+            break
+        # Redraw the higher-indexed motif of each violating row against the
+        # partner it's closest to, so a pair doesn't just swap places and
+        # re-trigger; keep the lower index fixed as that pair's representative.
+        nn_idx = np.argmin(d2, axis=-1)
+        redraw = np.zeros(K, dtype=bool)
+        for k in np.flatnonzero(bad):
+            partner = nn_idx[k]
+            redraw[max(k, partner)] = True
+        n_redraw = int(np.sum(redraw))
+        idx[redraw] = rng.choice(M, size=n_redraw, replace=K > M)
+    return idx
+
+
 def init(
     flat: jnp.ndarray,
     layout: ParamLayout,
@@ -235,6 +293,12 @@ def init(
     rng_seed, rng_mosaic = jax.random.split(rng)
     if M == 0:
         motifs = jnp.zeros((cfg.K, cfg.S), jnp.float32)
+    elif cfg.dedup_init:
+        # Host-side (SPEC.md §6.2 pattern): only ~K*n_iters distances, cheap
+        # next to the M-scale reconstruct/backward pass that follows init.
+        np_rng = np.random.default_rng(int(jax.random.randint(rng_seed, (), 0, 2**31 - 1)))
+        idx_np = _dedup_seed_indices(np_rng, np.asarray(blocks), cfg.K)
+        motifs = jnp.asarray(blocks)[idx_np].astype(jnp.float32)
     else:
         idx = jax.random.choice(rng_seed, M, (cfg.K,), replace=cfg.K > M)
         motifs = blocks[idx].astype(jnp.float32)

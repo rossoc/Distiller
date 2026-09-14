@@ -69,7 +69,9 @@ from typing import Any, Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
+from flax import nnx
 
 from model_jax.momos import metrics, tiling
 from model_jax.momos.drift import accumulate, cohort_indices, pick_coprime
@@ -101,22 +103,88 @@ def _params_from_blocks(
     scales: Optional[jnp.ndarray],
     layout: tiling.ParamLayout,
     scale_mode: str,
+    excluded_values: Optional[Tuple[jnp.ndarray, ...]] = None,
 ):
     dense = _dense_blocks(blocks, scales, layout, scale_mode)
     flat = tiling.from_blocks(dense, layout.n_values)
-    return tiling.unflatten_params(flat, layout)
+    return tiling.unflatten_params(flat, layout, excluded_values=excluded_values)
 
 
-def reconstruct(state: MosaicState):
+def reconstruct(
+    state: MosaicState,
+    gather_dtype: Optional[jnp.dtype] = None,
+    excluded_values: Optional[Tuple[jnp.ndarray, ...]] = None,
+):
     """SPEC.md §5's ``reconstruct``: gather the dictionary into a dense tree.
 
     Reads ``state.mosaic`` — the *pre-swap* assignment, per the micro-loop's
     load-bearing ordering: step A's forward/backward pass, and therefore
     whatever ``reconstruct`` is called with, always sees the mosaic step D's
     swap has not yet touched.
+
+    **Lazy, per-tensor gather** (``SPEC_PHASE_PERF.md`` §6 stage A). The naive
+    implementation — ``state.motifs[state.mosaic]`` — materialises one ``(M,
+    S)`` dense array holding *every* mosaicked weight in the model at once:
+    at 7B parameters that is tens of GB of transient memory the persistent
+    compression ledger never counts (``SPEC_PHASE_PERF.md`` §1). Gathering one
+    leaf at a time instead — reading only the slice of ``state.mosaic``
+    that leaf's values fall in — makes the peak transient the size of the
+    *largest single tensor*, not the whole model, and gives XLA's scheduler
+    the freedom to free each leaf's gathered blocks before the next leaf's
+    gather runs (Pallas fused kernels, SPEC_PHASE_PERF.md §6 stage B, would
+    remove this transient altogether; this is the free win available in pure
+    JAX first).
+
+    This is **exact** regardless of whether a leaf's value range happens to
+    align with block boundaries — a leaf that starts or ends mid-block reads
+    that shared block twice (once from each neighbouring leaf's gather) and
+    slices out only the values that belong to it, rather than assuming the
+    per-tensor padding the module docstring in ``tiling.py`` describes but
+    ``flatten_params`` does not currently perform.
+
+    ``gather_dtype``, if given, casts each leaf's gathered blocks to that
+    dtype *before* applying the per-tensor scale and before casting back to
+    the leaf's declared dtype — e.g. ``jnp.bfloat16`` halves the transient
+    gather traffic for inference, at the gathered value's precision, without
+    changing ``state.motifs`` itself or any persisted array. ``None`` (the
+    default) reproduces the previous behaviour bit-for-bit.
+
+    ``excluded_values``, if given, overrides the leaves ``include`` rejected
+    (see ``tiling.unflatten_params``) — used by
+    ``model_jax.momos.integration`` to reconstruct with those leaves' *trained*
+    values rather than their frozen init.
     """
-    flat_blocks = state.motifs[state.mosaic]
-    return _params_from_blocks(flat_blocks, state.scales, state.layout, state.cfg.scale_mode)
+    layout = state.layout
+    cfg = state.cfg
+    S = state.motifs.shape[-1]
+    scale_mode = cfg.scale_mode
+
+    if excluded_values is None:
+        items = [(path, nnx.Param(jnp.asarray(value))) for path, value in layout.excluded]
+    else:
+        items = [
+            (path, nnx.Param(jnp.asarray(value)))
+            for (path, _), value in zip(layout.excluded, excluded_values)
+        ]
+    for leaf_id, (path, shape, dtype, offset) in enumerate(
+        zip(layout.paths, layout.shapes, layout.dtypes, layout.offsets)
+    ):
+        size = int(np.prod(shape)) if shape else 1
+        start_block = offset // S
+        end_block = -(-(offset + size) // S)  # ceil division
+
+        sub_blocks = state.motifs[state.mosaic[start_block:end_block]]  # (n_blocks, S)
+        if gather_dtype is not None:
+            sub_blocks = sub_blocks.astype(gather_dtype)
+        if scale_mode == "per_tensor":
+            sub_blocks = sub_blocks * state.scales[leaf_id].astype(sub_blocks.dtype)
+
+        flat_leaf = sub_blocks.reshape(-1)[
+            offset - start_block * S : offset - start_block * S + size
+        ]
+        value = jnp.reshape(flat_leaf, shape).astype(dtype)
+        items.append((path, nnx.Param(value)))
+    return nnx.statelib.from_flat_state(items)
 
 
 def _propose_swaps(

@@ -21,6 +21,7 @@ defaults:
   - predict: default
   - wandb: default
   - runtime: default
+  - momos_backbone: default
   - _self_
 
 # Device mesh for data-parallel training (model_jax/sharding.py).

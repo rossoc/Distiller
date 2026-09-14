@@ -97,6 +97,16 @@ def test_default_include_excludes_exactly_the_documented_leaves():
     assert layout.n_tensors == 2
 
 
+def test_default_include_excludes_norm_f_weight_when_nested():
+    """The real Mamba2 model nests ``norm_f`` under ``backbone`` (SPEC_PHASE_D_
+    DEFECTS.md-style regression: the exact-path check only matched the
+    top-level ``("norm_f", "weight")`` case)."""
+    assert tiling.default_include(("backbone", "norm_f", "weight")) is False
+    assert tiling.default_include(("norm_f", "weight")) is False
+    assert tiling.default_include(("backbone", "layers", 0, "norm", "weight")) is False
+    assert tiling.default_include(("backbone", "layers", 0, "mixer", "out_proj")) is True
+
+
 def test_include_everything_drops_nothing():
     tree = _param_state()
     _, layout = tiling.flatten_params(tree, include=tiling.include_everything)

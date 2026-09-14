@@ -33,3 +33,4 @@ seed: 0
 seeds: [0]
 reserve_zero_motif: false
 show_u0: false
+dedup_init: false  # F2 control (SPEC_PHASE_D_DEFECTS.md §F2): redraw near-duplicate seed motifs

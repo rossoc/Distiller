@@ -1,0 +1,43 @@
+# Hydra config group: momos_backbone
+# Phase E (SPEC.md §8, src/model_jax/momos/SPEC_PHASE_E.md): replace the
+# Mamba2 backbone's dense nnx.Param weights with a MoMos dictionary. Disabled
+# by default — src/train_jax.py's dense path (nnx.Optimizer over every
+# nnx.Param) is untouched when enabled: false, so this can never regress a
+# normal run; it only takes effect when explicitly turned on.
+#
+# Override via: python src/train_jax.py momos_backbone.enabled=true
+#            or: python src/train_jax.py momos_backbone=default momos_backbone.K=4096
+
+enabled: false
+
+# --- MosaicConfig fields (model_jax.momos.state.MosaicConfig) ---
+# Block size S and dictionary size K — see SPEC.md §1/§2 and
+# SPEC_PHASE_PERF.md §4 for how these trade compression against quality.
+S: 1
+K: 4096
+scale_mode: none
+
+# Step D (per-step swap) knobs — 0 disables swapping entirely (Phase B
+# behaviour: only the dictionary values train, the mosaic is fixed after
+# init). SPEC_PHASE_D_DEFECTS.md's F1/F2 verdict found lifecycle did not
+# clear its bar against plain swapping in the toy-task regime, so lifecycle
+# (merge/drop) is deliberately NOT wired into src/train_jax.py yet — only
+# static/single are reachable from this config today.
+subset_size: 0
+margin: 1.0e-6
+n_neighbors: 8
+
+reserve_zero_motif: false
+dedup_init: false
+
+# --- Knobs specific to the real-model integration, not MosaicConfig fields ---
+
+# The dictionary's own learning rate is training.learning_rate * this
+# multiplier. It is NOT necessarily the right value to reuse as-is: the
+# dictionary and the dense per-tensor optimiser groups are updating
+# structurally different things (one shared (K,S) array vs per-tensor
+# matrices), so there is no a priori reason the same number is right for
+# both. SPEC_PHASE_E.md's smoke test found this needs its own sweep before
+# Phase E's gate can be called passed; until then this is the tunable knob
+# to sweep first.
+dict_lr_mult: 1.0

@@ -73,8 +73,8 @@ def merge_step(
 
     Candidate pairs come from ``maintenance.neighbour_graph``. Union-find
     with path compression groups connected components, picking the lowest
-    index as root. Rewrites ``mosaic`` in place preserving dtype and deactivates
-    non-root members.
+    index as root. Returns a new ``mosaic`` array preserving dtype (the
+    caller's array is never mutated) and deactivates non-root members.
 
     Returns:
         (new_mosaic, new_active, n_merged, realised_thr, floor_clamped)
@@ -84,7 +84,7 @@ def merge_step(
     live_count = len(live_indices)
 
     if live_count < 2:
-        return mosaic, active.copy(), 0, 0.0, False
+        return mosaic.copy(), active.copy(), 0, 0.0, False
 
     # 1. Exact nearest live neighbours for every motif (all n_neighbors columns)
     graph = maintenance.neighbour_graph(
@@ -109,7 +109,7 @@ def merge_step(
     d_cand = d_all[valid_edge]
 
     if len(d_cand) == 0:
-        return mosaic, active.copy(), 0, 0.0, False
+        return mosaic.copy(), active.copy(), 0, 0.0, False
 
     # Canonicalise pairs to (min, max) and de-duplicate (SPEC_PHASE_D_DEFECTS.md §D2)
     min_uv = np.minimum(u_cand, v_cand)
@@ -144,8 +144,11 @@ def merge_step(
 
     if len(candidate_d) == 0 or budget == 0:
         clamped = len(candidate_d) > 0 and budget == 0
-        realised_thr = 0.0 if clamped else thr
-        return mosaic, active.copy(), 0, realised_thr, clamped
+        # Report the computed thr even when the min_live_frac floor is what's
+        # actually saturated (SPEC_PHASE_D_DEFECTS.md §D6): thr=0.0 here would
+        # be indistinguishable from a degenerate dictionary, when what
+        # happened is the floor binding on real candidates at a real thr.
+        return mosaic.copy(), active.copy(), 0, thr, clamped
 
     # Sort candidate pairs by distance in ascending order (Kruskal-style)
     order = np.argsort(candidate_d)
@@ -275,10 +278,13 @@ def drop_step(
     return new_active, counts, n_dropped
 
 
-def lifecycle_pass(
-    state: MosaicState, step: int = 0
-) -> Tuple[MosaicState, LifecycleMetrics]:
-    """Run one host lifecycle pass: merge -> drop (SPEC_PHASE_D.md §5)."""
+def lifecycle_pass(state: MosaicState) -> Tuple[MosaicState, LifecycleMetrics]:
+    """Run one host lifecycle pass: merge -> drop (SPEC_PHASE_D.md §5).
+
+    No ``step`` parameter: an earlier revision took one for revive's seeded
+    RNG, but revive was removed (SPEC_PHASE_D.md §2) and nothing here needs
+    randomness (SPEC_PHASE_D_DEFECTS.md §D8).
+    """
     motifs = np.asarray(state.motifs)
     mosaic = np.asarray(state.mosaic)
     active = np.asarray(state.active)
@@ -288,29 +294,24 @@ def lifecycle_pass(
     entropy_before = metrics.usage_entropy(state)
 
     scale = merge_scale(motifs, active)
-    if scale <= 0.0 or not np.isfinite(scale):
-        # Degenerate dictionary; skip pass
-        met = LifecycleMetrics(
-            n_merged=0,
-            n_dropped=0,
-            live_before=live_before,
-            live_after=live_before,
-            entropy_before=entropy_before,
-            entropy_after=entropy_before,
-            merge_scale=scale if np.isfinite(scale) else 0.0,
-            merge_thr=0.0,
-            floor_clamped=False,
+    degenerate_scale = scale <= 0.0 or not np.isfinite(scale)
+    if degenerate_scale:
+        # Degenerate dictionary: the scale-derived part of the pass (merge)
+        # can't run, but drop depends only on the mosaic, not scale
+        # (SPEC_PHASE_D_DEFECTS.md §D7) -- skip merge only, still run drop
+        # so unused slots keep getting reclaimed.
+        new_mosaic, post_merge_active, n_merged, merge_thr, floor_clamped = (
+            mosaic, active, 0, 0.0, False
         )
-        return state, met
-
-    # 1. Merge (SPEC_PHASE_D.md §5.1, §5.3)
-    new_mosaic, post_merge_active, n_merged, merge_thr, floor_clamped = merge_step(
-        motifs, mosaic, active, scale, cfg
-    )
+    else:
+        # 1. Merge (SPEC_PHASE_D.md §5.1, §5.3)
+        new_mosaic, post_merge_active, n_merged, merge_thr, floor_clamped = merge_step(
+            motifs, mosaic, active, scale, cfg
+        )
 
     # 2. Drop (SPEC_PHASE_D.md §5.2)
     min_live = max(1, math.ceil(cfg.min_live_frac * cfg.K))
-    post_drop_active, counts, n_dropped = drop_step(
+    post_drop_active, _counts, n_dropped = drop_step(
         new_mosaic,
         post_merge_active,
         cfg.K,
@@ -334,6 +335,8 @@ def lifecycle_pass(
         live_after=live_after,
         entropy_before=entropy_before,
         entropy_after=entropy_after,
+        # merge_scale() already returns 0.0 for non-finite/non-positive input
+        # (SPEC_PHASE_D_DEFECTS.md §D8), so `scale` itself is never non-finite here.
         merge_scale=scale,
         merge_thr=merge_thr,
         floor_clamped=floor_clamped,
