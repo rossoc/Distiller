@@ -1,0 +1,36 @@
+# Hydra config group: training (JAX-only variant)
+# Override via: python src/train_jax.py training.learning_rate=5.0e-5
+#
+# The JAX path's own tuned defaults, from Optuna (mamba.db, study
+# "mamba2_rnn_search2", trial 58, eval_loss=0.2380471428235372) — see
+# config_jax.yaml's defaults list, which selects this group instead of
+# `training/default.yaml`.
+#
+# This is a SEPARATE file rather than an edit to `training/default.yaml`
+# on purpose: that file is shared with the PyTorch path (config.yaml), which
+# has its own, differently-tuned best hyperparameters (a different Optuna
+# study — see outputs/2026-09-11/09-12-59/cv.log). Overwriting the shared
+# default with the JAX-tuned values would have silently detuned every torch
+# run's defaults too.
+#
+# Knobs Optuna didn't search (max_grad_norm, eval_batch_multiplier,
+# gradient_accumulation_steps, logging_steps, output_dir, seed) are carried
+# over unchanged from `training/default.yaml`.
+
+learning_rate: 0.0006883131060211034
+weight_decay: 0.0065705784047657085
+warmup_ratio: 0.06095744496605359
+lr_scheduler: cosine
+max_grad_norm: 1.0
+
+# batch_size tuned by Optuna (only 64 was in its search space) — also
+# matches this session's own memory-tuning work for the JAX path.
+batch_size: 64
+eval_batch_multiplier: 1
+gradient_accumulation_steps: 2
+num_train_epochs: 3
+
+logging_steps: 10
+
+output_dir: outputs
+seed: 42

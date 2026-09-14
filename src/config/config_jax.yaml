@@ -9,14 +9,17 @@
 # which mean nothing here. Splitting the root keeps both honest instead of
 # leaving a half-applicable Lightning block lying around.
 #
-# Everything else — data, training, optuna, runtime, wandb — is the *same*
-# config group the PyTorch path uses, so hyperparameters stay comparable
-# across the two backends.
+# data, optuna, runtime, wandb are the *same* config group the PyTorch path
+# uses, so those hyperparameters stay comparable across the two backends.
+# `training` is the one exception: it points at `mamba2_jax_tuned`, a
+# JAX-only group carrying this backend's own Optuna-tuned defaults, so
+# tuning one backend can't silently detune the other's — see that file's
+# header for why.
 
 defaults:
-  - data: default
+  - data: rnn
   - model: mamba2_jax
-  - training: default
+  - training: mamba2_jax_tuned
   - optuna: mamba2_jax
   - predict: default
   - wandb: default

@@ -32,6 +32,7 @@ from model_jax.donor_projection import (
     _projected_rms,
     build_projections,
     cached_principal_basis,
+    load_donor_tables,
     p_from_torch_embedding,
     principal_basis,
     q_from_torch_head,
@@ -60,6 +61,53 @@ def _rngs(seed: int = 0) -> nnx.Rngs:
 def _build(**kw):
     kw.setdefault("cache_dir", None)
     return build_projections(_tables(), D_MODEL, _rngs(), **kw)
+
+
+# ---------------------------------------------------------------------------
+# load_donor_tables — the real scripts/convert_donor_checkpoint.py round trip
+# ---------------------------------------------------------------------------
+
+
+def _write_donor_npz(path, embed_np, head_np, model_id: str = "toy/donor") -> None:
+    """Mirror scripts/convert_donor_checkpoint.py's own save exactly (same
+    ml_dtypes.bfloat16 cast, same np.savez call), so this test fails the same
+    way that script's real output would if the round trip ever regresses."""
+    np.savez(path / "donor_tables.npz", embed=embed_np, head=head_np, model_id=np.asarray(model_id))
+
+
+def test_load_donor_tables_bf16_round_trip_survives_npz(tmp_path):
+    """Regression test: ``np.savez``/``np.load`` do not preserve
+    ``ml_dtypes.bfloat16``'s dtype tag — the array round-trips as raw ``|V2``
+    void bytes, which used to make ``load_donor_tables`` raise ``ValueError:
+    No cast function available`` on every real (bf16-converted) donor. The
+    bytes are correct; only the header's dtype tag is lost, which is why the
+    fix (``_reinterpret_bfloat16``) is a ``.view``, not a cast."""
+    import ml_dtypes
+
+    rng = np.random.default_rng(0)
+    embed_np = (rng.standard_normal((37, 11)) * 0.05).astype(ml_dtypes.bfloat16)
+    head_np = (rng.standard_normal((37, 11)) * 0.03).astype(ml_dtypes.bfloat16)
+    _write_donor_npz(tmp_path, embed_np, head_np)
+
+    tables = load_donor_tables(str(tmp_path), dtype=jnp.bfloat16, use_cache=False)
+
+    assert tables.embed.dtype == jnp.bfloat16
+    assert tables.head.dtype == jnp.bfloat16
+    np.testing.assert_array_equal(np.asarray(tables.embed).view(np.uint16), embed_np.view(np.uint16))
+    np.testing.assert_array_equal(np.asarray(tables.head).view(np.uint16), head_np.view(np.uint16))
+
+
+def test_load_donor_tables_fp32_round_trip_is_unaffected(tmp_path):
+    """The fix must not touch the already-working native-dtype path."""
+    rng = np.random.default_rng(1)
+    embed_np = (rng.standard_normal((37, 11)) * 0.05).astype(np.float32)
+    head_np = (rng.standard_normal((37, 11)) * 0.03).astype(np.float32)
+    _write_donor_npz(tmp_path, embed_np, head_np)
+
+    tables = load_donor_tables(str(tmp_path), dtype=jnp.float32, use_cache=False)
+
+    np.testing.assert_allclose(np.asarray(tables.embed), embed_np)
+    np.testing.assert_allclose(np.asarray(tables.head), head_np)
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 # This file only wires them together + the Trainer instantiation.
 
 defaults:
-  - data: default
+  - data: rnn
   - model: default
   - training: default
   - optuna: default

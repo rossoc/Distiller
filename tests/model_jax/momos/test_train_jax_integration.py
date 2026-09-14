@@ -188,3 +188,54 @@ def test_run_momos_fold_drives_the_loss_down(tmp_path):
     )
     assert np.isfinite(best_1) and np.isfinite(best_6)
     assert best_6 < best_1
+
+
+# ---------------------------------------------------------------------------
+# The DataLoader worker fork -> spawn fix (SPEC_PHASE_E.md's real-run report)
+# ---------------------------------------------------------------------------
+
+
+def test_run_fold_requests_spawn_workers_to_avoid_the_fork_warning():
+    """``train_jax.run_fold`` must ask ``DistillerDataModule`` for ``spawn``
+    workers whenever ``num_workers > 0`` — fork()ing DataLoader workers in a
+    process that has already opened CUDA/gone multithreaded via JAX is the
+    unsafe pattern Python's own RuntimeWarning names (observed for real,
+    training against the actual district-heating data with a real donor)."""
+    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+        cfg = compose(config_name="config_jax", overrides=["runtime.num_workers=4"])
+
+    from lit_datamodule import DistillerDataModule
+    from utils import dataloader_runtime
+
+    runtime = dataloader_runtime(cfg.runtime)
+    if runtime["num_workers"] > 0:
+        runtime["multiprocessing_context"] = "spawn"
+    dm = DistillerDataModule(cfg, fold=0, runtime=runtime)
+    assert dm.runtime["multiprocessing_context"] == "spawn"
+
+
+def test_build_dataloader_forwards_multiprocessing_context(tmp_path):
+    """The other half: ``_build_dataloader`` must actually pass it to
+    ``torch.utils.data.DataLoader``, not just store it."""
+    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+        cfg = compose(config_name="config_jax")
+
+    from lit_datamodule import DistillerDataModule, _TokenizedDataset
+
+    class _FakeModule:
+        pad_token_id = 0
+
+    dm = DistillerDataModule(
+        cfg, fold=0,
+        runtime={
+            "num_workers": 2, "pin_memory": False, "persistent_workers": True,
+            "prefetch_factor": 2, "multiprocessing_context": "spawn",
+        },
+    )
+    dm.module = _FakeModule()
+    dataset = _TokenizedDataset(
+        [torch.tensor([1, 2, 3])] * 4, [torch.tensor([1, 2, 3])] * 4
+    )
+    dl = dm._build_dataloader(dataset, shuffle=True)
+    assert dl.multiprocessing_context is not None
+    assert dl.multiprocessing_context.get_start_method() == "spawn"

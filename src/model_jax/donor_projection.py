@@ -101,6 +101,29 @@ class DonorTables:
 _DONOR_CACHE: dict[tuple[str, str], DonorTables] = {}
 
 
+def _reinterpret_bfloat16(raw: np.ndarray) -> np.ndarray:
+    """Recover ``ml_dtypes.bfloat16`` arrays ``np.savez`` mis-tagged as void.
+
+    ``scripts/convert_donor_checkpoint.py`` saves bf16 tables via
+    ``ml_dtypes.bfloat16`` so they survive the ``.npz`` round-trip without
+    NumPy silently upcasting to fp32 (per that script's own comment) — but
+    ``np.savez``/``np.load`` do not actually preserve that dtype's tag: the
+    array round-trips as raw ``|V2`` void bytes, a generic 2-byte blob NumPy
+    has no registered cast *from* (hence ``jnp.asarray(..., dtype=bfloat16)``
+    failing with "No cast function available", not a dtype mismatch in the
+    data itself). The bytes are exactly right, only the header's dtype tag
+    is lost, so this reinterprets rather than casts — a zero-copy ``.view``,
+    not a conversion. Every other dtype this pipeline saves (fp16, fp32) is
+    NumPy-native and round-trips with its tag intact, so this only fires for
+    the one case that needs it.
+    """
+    if raw.dtype.kind == "V" and raw.itemsize == 2:
+        import ml_dtypes
+
+        return raw.view(ml_dtypes.bfloat16)
+    return raw
+
+
 def load_donor_tables(
     donor_dir: str,
     dtype: jnp.dtype = jnp.bfloat16,
@@ -129,8 +152,8 @@ def load_donor_tables(
 
     with np.load(npz, allow_pickle=False) as blob:
         model_id = str(blob["model_id"]) if "model_id" in blob else str(path)
-        embed = jnp.asarray(blob["embed"], dtype=dtype)
-        head = jnp.asarray(blob["head"], dtype=dtype)
+        embed = jnp.asarray(_reinterpret_bfloat16(blob["embed"]), dtype=dtype)
+        head = jnp.asarray(_reinterpret_bfloat16(blob["head"]), dtype=dtype)
 
     tables = DonorTables(model_id, embed, head)
     log.info(

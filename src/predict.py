@@ -346,7 +346,6 @@ def generate_for_prompts(
 @hydra.main(
     config_path=str(Path(__file__).parent / "config"),
     config_name="config",
-    version_base="1.3",
 )
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(

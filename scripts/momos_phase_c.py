@@ -135,6 +135,7 @@ class MomosResult(tuple):
     ``atol=0`` without depending on derived metrics that can mask a state
     difference too small to move loss/live/entropy.
     """
+
     usage_0: int
     usage_0_frac: float
     final_motifs: Any
@@ -210,7 +211,9 @@ def train_momos(
 
     if arm == "drift":
 
-        def core_drift(motifs, mosaic, active, scales, opt_state, drift, window, rng, x, y, w):
+        def core_drift(
+            motifs, mosaic, active, scales, opt_state, drift, window, rng, x, y, w
+        ):
             s = MosaicState(
                 motifs=motifs,
                 mosaic=mosaic,
@@ -224,7 +227,13 @@ def train_momos(
             new_s, loss, _, new_drift = train_step(
                 s, (x, y, w), rng, loss_fn, tx, drift=drift, window=window
             )
-            fields = (new_s.motifs, new_s.mosaic, new_s.active, new_s.scales, new_s.opt_state)
+            fields = (
+                new_s.motifs,
+                new_s.mosaic,
+                new_s.active,
+                new_s.scales,
+                new_s.opt_state,
+            )
             return fields, loss, new_drift
 
         jit_core_drift = jax.jit(core_drift)
@@ -235,15 +244,19 @@ def train_momos(
         codebook_dirs = drift_st.codebook_dirs
         window = 0
 
-        fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
+        fields = (
+            state.motifs,
+            state.mosaic,
+            state.active,
+            state.scales,
+            state.opt_state,
+        )
         key = jax.random.key(seed + 1)
 
         for step in range(steps):
             key, sub, step_rng = jax.random.split(key, 3)
             x, y, w = make_batch(sub, batch, seq_len)
-            fields, _, drift = jit_core_drift(
-                *fields, drift, window, step_rng, x, y, w
-            )
+            fields, _, drift = jit_core_drift(*fields, drift, window, step_rng, x, y, w)
 
             if (step + 1) % cfg.eval_window == 0:
                 cohort = cohort_indices(window, M, C, cfg.A, cfg.B)
@@ -270,7 +283,9 @@ def train_momos(
             # window-end branch: nesting it silently skipped every rebuild
             # whenever eval_window did not divide maintenance_every.
             if maint_every > 0 and (step + 1) % maint_every == 0:
-                graph = maintenance.neighbour_graph(fields[0], fields[2], cfg.n_neighbors)
+                graph = maintenance.neighbour_graph(
+                    fields[0], fields[2], cfg.n_neighbors
+                )
 
     else:
 
@@ -286,16 +301,30 @@ def train_momos(
                 graph=graph,
             )
             new_s, loss, swap_rate = train_step(s, (x, y, w), rng, loss_fn, tx)
-            fields = (new_s.motifs, new_s.mosaic, new_s.active, new_s.scales, new_s.opt_state)
+            fields = (
+                new_s.motifs,
+                new_s.mosaic,
+                new_s.active,
+                new_s.scales,
+                new_s.opt_state,
+            )
             return fields, loss, swap_rate
 
         jit_core_single = jax.jit(core_single)
 
         graph = None
         if cfg.subset_size > 0:
-            graph = maintenance.neighbour_graph(state.motifs, state.active, cfg.n_neighbors)
+            graph = maintenance.neighbour_graph(
+                state.motifs, state.active, cfg.n_neighbors
+            )
 
-        fields = (state.motifs, state.mosaic, state.active, state.scales, state.opt_state)
+        fields = (
+            state.motifs,
+            state.mosaic,
+            state.active,
+            state.scales,
+            state.opt_state,
+        )
         key = jax.random.key(seed + 1)
 
         for step in range(steps):
@@ -307,9 +336,8 @@ def train_momos(
                 swap_history.append(float(swap_rate))
                 if maint_every > 0 and (step + 1) % maint_every == 0:
                     maint_pass = (step + 1) // maint_every
-                    if (
-                        cfg.lifecycle_every > 0
-                        and (maint_pass % cfg.lifecycle_every == 0)
+                    if cfg.lifecycle_every > 0 and (
+                        maint_pass % cfg.lifecycle_every == 0
                     ):
                         cur_state = MosaicState(
                             motifs=fields[0],
@@ -330,7 +358,9 @@ def train_momos(
                             cur_state.opt_state,
                         )
                         lifecycle_history.append(pass_metrics)
-                    graph = maintenance.neighbour_graph(fields[0], fields[2], cfg.n_neighbors)
+                    graph = maintenance.neighbour_graph(
+                        fields[0], fields[2], cfg.n_neighbors
+                    )
 
     final_state = MosaicState(
         motifs=fields[0],
@@ -350,7 +380,14 @@ def train_momos(
     final_entropy = metrics.usage_entropy(final_state)
     u0_count, u0_frac = metrics.zero_motif_usage(final_state)
     return MomosResult(
-        (eval_loss, swap_history, spread_history, final_live, final_entropy, lifecycle_history),
+        (
+            eval_loss,
+            swap_history,
+            spread_history,
+            final_live,
+            final_entropy,
+            lifecycle_history,
+        ),
         usage_0=u0_count,
         usage_0_frac=u0_frac,
         final_motifs=final_state.motifs,
@@ -389,7 +426,14 @@ def _cell_ledger(
     M = math.ceil(N / S)
     drift_b = drift_buffer_bytes(M, S, cohort_frac) if cohort_frac > 0 else 0
     bw_drift = bw_base + drift_b / N
-    return bw_base, ratio_base, bw_drift, DENSE_BYTES_PER_WEIGHT / bw_drift, asymptotic_bytes_per_weight(cfg)
+    return (
+        bw_base,
+        ratio_base,
+        bw_drift,
+        DENSE_BYTES_PER_WEIGHT / bw_drift,
+        asymptotic_bytes_per_weight(cfg),
+    )
+
 
 def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
     """Compare every method in ``gate.arms`` across the (S, K) sweep.
@@ -451,7 +495,9 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
         knobs.pop("method", None)
         print(f"  {a:<15} : " + ", ".join(f"{k}={v}" for k, v in knobs.items()))
     print(f"constant baseline : {baseline_mse:.4f}")
-    print(f"dense training    : {dense_loss:.5f}  ({dense_loss / baseline_mse:.1%} of baseline)")
+    print(
+        f"dense training    : {dense_loss:.5f}  ({dense_loss / baseline_mse:.1%} of baseline)"
+    )
     print()
 
     print(
@@ -474,9 +520,9 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
         header += f" {'Bwt_dft':>7} {'mem_x':>6}"
     header += f" {'B/wt_inf':>8}"
     for a in arms:
-        header += f" {a[:8]:>8} {a[:3]+'_lv':>6} {a[:4]+'_h':>6}"
+        header += f" {a[:8]:>8} {a[:3] + '_lv':>6} {a[:4] + '_h':>6}"
         if show_u0:
-            header += f" {a[:3]+'_u0':>6}"
+            header += f" {a[:3] + '_u0':>6}"
     for a in arms[1:]:
         header += f" {(a[:5] + '/ctl'):>9}"
     header += f" {'loss/dns':>8}  {'best':<12}"
@@ -498,7 +544,9 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
             if isinstance(item, str):
                 sep = next((c for c in ":/," if c in item), None)
                 if sep is None:
-                    raise ValueError(f"Cannot parse cell {item!r}; expected 'S:K' or [S, K]")
+                    raise ValueError(
+                        f"Cannot parse cell {item!r}; expected 'S:K' or [S, K]"
+                    )
                 parts = item.split(sep)
                 cell_pairs.append((int(parts[0]), int(parts[1])))
             else:
@@ -548,7 +596,9 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
             for s in seeds:
                 per_seed_results[s] = {}
                 for a in arms:
-                    arm_rzm = gate_rzm or bool(methods[a].get("reserve_zero_motif", False))
+                    arm_rzm = gate_rzm or bool(
+                        methods[a].get("reserve_zero_motif", False)
+                    )
                     arm_dedup = gate_dedup or bool(methods[a].get("dedup_init", False))
                     res = train_momos(
                         task,
@@ -579,10 +629,18 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                 arm_losses = [per_seed_results[s][a][0] for s in seeds]
                 losses[a] = float(np.mean(arm_losses))
                 loss_spreads[a] = float(np.max(arm_losses) - np.min(arm_losses))
-                lives[a] = int(round(np.mean([per_seed_results[s][a][3] for s in seeds])))
-                entropies[a] = float(np.mean([per_seed_results[s][a][4] for s in seeds]))
-                u0_counts[a] = int(round(np.mean([per_seed_results[s][a].usage_0 for s in seeds])))
-                u0_fracs[a] = float(np.mean([per_seed_results[s][a].usage_0_frac for s in seeds]))
+                lives[a] = int(
+                    round(np.mean([per_seed_results[s][a][3] for s in seeds]))
+                )
+                entropies[a] = float(
+                    np.mean([per_seed_results[s][a][4] for s in seeds])
+                )
+                u0_counts[a] = int(
+                    round(np.mean([per_seed_results[s][a].usage_0 for s in seeds]))
+                )
+                u0_fracs[a] = float(
+                    np.mean([per_seed_results[s][a].usage_0_frac for s in seeds])
+                )
                 swaps[a] = per_seed_results[seeds[0]][a][1]
                 spreads[a] = per_seed_results[seeds[0]][a][2]
                 lifecycles[a] = per_seed_results[seeds[0]][a][5]
@@ -593,9 +651,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                         f"{a}={per_seed_results[s][a][0]:.5f}" for a in arms
                     )
                     print(f"  seed {s}: {s_detail}", flush=True)
-                sp_detail = ", ".join(
-                    f"{a}={loss_spreads[a]:.5f}" for a in arms
-                )
+                sp_detail = ", ".join(f"{a}={loss_spreads[a]:.5f}" for a in arms)
                 print(f"  spread: {sp_detail}", flush=True)
 
                 if "lifecycle" in arms and "single" in arms:
@@ -604,7 +660,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                     if max_sp > gap:
                         v = f"INCONCLUSIVE (spread {max_sp:.5f} > gap {gap:.5f})"
                     elif losses["lifecycle"] < losses["single"]:
-                        v = f"PASS (gap {gap:.5f} > spread {max_sp:.5f}, ratio {losses['lifecycle']/losses['single']:.2f}x)"
+                        v = f"PASS (gap {gap:.5f} > spread {max_sp:.5f}, ratio {losses['lifecycle'] / losses['single']:.2f}x)"
                     else:
                         v = f"FAIL (single beats lifecycle by {gap:.5f} > spread {max_sp:.5f})"
                     f1_reports.append(
@@ -662,7 +718,9 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
                 shown = _bucket_means(vals, n_buckets=6) if len(vals) > 12 else vals
                 print(f"  {a:<9} swap_rate : " + "  ".join(f"{b:.3f}" for b in shown))
             if spreads.get(a):
-                print(f"  {a:<9} spread    : " + "  ".join(f"{b:.3f}" for b in spreads[a]))
+                print(
+                    f"  {a:<9} spread    : " + "  ".join(f"{b:.3f}" for b in spreads[a])
+                )
             if lifecycles.get(a):
                 for idx, lm in enumerate(lifecycles[a]):
                     print(
@@ -679,7 +737,7 @@ def run_gate(gate: DictConfig, methods: Dict[str, DictConfig]) -> None:
 CONFIG_DIR = str(Path(__file__).resolve().parent.parent / "src" / "config")
 
 
-@hydra.main(version_base=None, config_path=CONFIG_DIR, config_name="config_momos")
+@hydra.main(config_path=CONFIG_DIR, config_name="config_momos")
 def main(cfg: DictConfig) -> None:
     # Each arm reads its own momos/*.yaml. The arm that matches the selected
     # `momos` group uses the composed cfg.momos instead of the file, so CLI

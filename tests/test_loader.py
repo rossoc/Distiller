@@ -12,6 +12,7 @@ from data.loader import (
     build_samples,
     build_samples_by_row,
     count_by_target,
+    deduplicate_rows,
     kfold_indices,
     split_rows_by_max_length,
     train_test_row_split,
@@ -294,6 +295,48 @@ def test_train_test_row_split_at_least_one_test_row():
     df = pl.DataFrame({"id": list(range(3))})
     _, test_df = train_test_row_split(df, test_frac=0.01, seed=0)
     assert len(test_df) >= 1
+
+
+# ---------------------------------------------------------------------------
+# deduplicate_rows
+# ---------------------------------------------------------------------------
+
+
+def test_deduplicate_rows_drops_exact_duplicate_rows():
+    df = pl.DataFrame(
+        {
+            "S_text": ["a", "b", "a", "c"],
+            "L_text": ["x", "y", "x", "z"],
+        }
+    )
+    deduped = deduplicate_rows(df)
+    assert len(deduped) == 3
+    assert deduped["S_text"].to_list() == ["a", "b", "c"]
+
+
+def test_deduplicate_rows_keeps_rows_that_differ_in_any_column():
+    df = pl.DataFrame(
+        {
+            "S_text": ["a", "a"],
+            "L_text": ["x", "y"],
+        }
+    )
+    deduped = deduplicate_rows(df)
+    assert len(deduped) == 2
+
+
+def test_deduplicate_rows_no_duplicates_is_a_no_op():
+    df = pl.DataFrame({"S_text": ["a", "b", "c"]})
+    deduped = deduplicate_rows(df)
+    assert deduped["S_text"].to_list() == df["S_text"].to_list()
+
+
+def test_deduplicate_rows_preserves_original_row_order():
+    df = pl.DataFrame({"S_text": ["c", "a", "c", "b", "a"]})
+    deduped = deduplicate_rows(df)
+    # First occurrence of each value, in the order it first appeared —
+    # not sorted, not shuffled.
+    assert deduped["S_text"].to_list() == ["c", "a", "b"]
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,8 @@ import polars as pl
 import torch
 from torch.utils.data import Dataset
 
+log = logging.getLogger(__name__)
+
 # fastexcel sometimes can't infer a dtype for (mostly-empty / mixed) text
 # columns and falls back to string — exactly what we want for span extraction.
 # Silence the per-column noise.
@@ -289,12 +291,38 @@ def kfold_indices(
 # ---------------------------------------------------------------------------
 
 
+def deduplicate_rows(df: pl.DataFrame, *, source: str = "") -> pl.DataFrame:
+    """Drop exact-duplicate rows (every column equal), keeping the first copy.
+
+    Called once, right after the raw XLSX is read, so it's the single place
+    that keeps a duplicate row from silently being counted twice in training
+    or, worse, leaking across the train/test split (identical rows landing on
+    both sides, inflating held-out metrics). ``keep="first"`` +
+    ``maintain_order=True`` so which copy survives is deterministic given the
+    same input, matching the rest of this module's fixed-seed splits.
+    """
+    deduped = df.unique(keep="first", maintain_order=True)
+    n_dupes = len(df) - len(deduped)
+    if n_dupes:
+        log.info(
+            "Dropped %d exact-duplicate row(s) out of %d%s.",
+            n_dupes, len(df), f" from {source}" if source else "",
+        )
+    return deduped
+
+
 def read_ground_truth(
     xlsx_path: str,
     sheet_name: str = "Ground Truth",
 ) -> pl.DataFrame:
-    """Load the Ground Truth sheet from an XLSX file as a Polars DataFrame."""
-    return pl.read_excel(xlsx_path, sheet_name=sheet_name)
+    """Load the Ground Truth sheet from an XLSX file as a Polars DataFrame.
+
+    Deduped via :func:`deduplicate_rows` before anything else touches it —
+    both backends, and every split downstream (train/test, K-fold), call this
+    one function.
+    """
+    df = pl.read_excel(xlsx_path, sheet_name=sheet_name)
+    return deduplicate_rows(df, source=f"{xlsx_path} (sheet={sheet_name})")
 
 
 # ---------------------------------------------------------------------------

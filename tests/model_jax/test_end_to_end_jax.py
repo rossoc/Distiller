@@ -42,8 +42,14 @@ def _model(**overrides) -> MimirMamba2Model:
         jnp.asarray((torch.randn(VOCAB, D_DONOR, generator=g) * 0.05).numpy()),
     )
     kwargs = dict(
-        d_model=32, num_hidden_layers=2, state_size=8, head_dim=16, chunk_size=8,
-        projection_cache_dir=None, loss_chunk_tokens=8, gradient_checkpointing=False,
+        d_model=32,
+        num_hidden_layers=2,
+        state_size=8,
+        head_dim=16,
+        chunk_size=8,
+        projection_cache_dir=None,
+        loss_chunk_tokens=8,
+        gradient_checkpointing=False,
     )
     kwargs.update(overrides)
     return MimirMamba2Model(tables, rngs=nnx.Rngs(params=0), **kwargs)
@@ -55,7 +61,7 @@ def _model(**overrides) -> MimirMamba2Model:
 
 
 def test_jax_config_tree_composes():
-    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+    with initialize_config_dir(config_dir=CONFIG_DIR):
         cfg = compose(config_name="config_jax")
 
     assert cfg.model.kind == "mamba2_jax"
@@ -71,20 +77,28 @@ def test_loop_knobs_live_under_training_so_optuna_overrides_reach_them():
     ``_apply_trial_overrides`` only writes into ``model_kwargs`` and
     ``cfg.training``; a knob read from anywhere else is invisible to Optuna.
     """
-    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+    with initialize_config_dir(config_dir=CONFIG_DIR):
         cfg = compose(config_name="config_jax")
 
     for key in (
-        "num_train_epochs", "batch_size", "gradient_accumulation_steps",
-        "max_grad_norm", "learning_rate", "weight_decay", "warmup_ratio",
-        "lr_scheduler", "eval_batch_multiplier", "seed", "output_dir",
+        "num_train_epochs",
+        "batch_size",
+        "gradient_accumulation_steps",
+        "max_grad_norm",
+        "learning_rate",
+        "weight_decay",
+        "warmup_ratio",
+        "lr_scheduler",
+        "eval_batch_multiplier",
+        "seed",
+        "output_dir",
     ):
         assert key in cfg.training, key
 
 
 def test_every_searched_parameter_reaches_the_model_or_the_training_config():
     """A search-space name matching neither target would be silently ignored."""
-    with initialize_config_dir(config_dir=CONFIG_DIR, version_base=None):
+    with initialize_config_dir(config_dir=CONFIG_DIR):
         cfg = compose(config_name="config_jax", overrides=["optuna=mamba2_jax"])
 
     # apply_trial_overrides writes a suggestion into model_kwargs (built from
@@ -142,9 +156,13 @@ def test_exported_torch_model_matches_the_jax_model_logits():
         ).logits.numpy()
 
     assert jax_logits.shape == torch_logits.shape == (2, 11, VOCAB)
-    rel = np.abs(jax_logits - torch_logits).max() / max(np.abs(torch_logits).max(), 1e-6)
-    print(f"\nexport parity: max abs {np.abs(jax_logits - torch_logits).max():.3e}, "
-          f"max rel {rel:.3e}")
+    rel = np.abs(jax_logits - torch_logits).max() / max(
+        np.abs(torch_logits).max(), 1e-6
+    )
+    print(
+        f"\nexport parity: max abs {np.abs(jax_logits - torch_logits).max():.3e}, "
+        f"max rel {rel:.3e}"
+    )
     assert rel < 1e-4
 
 
@@ -174,9 +192,15 @@ def test_short_training_run_drives_the_loss_down_without_recompiling():
     model = _model(gradient_checkpointing=True)
     tx, _ = build_optimizer(
         nnx.state(model, nnx.Param),
-        learning_rate=3e-3, weight_decay=0.01, projection_lr_mult=1.0,
-        warmup_ratio=0.1, lr_scheduler="cosine", max_grad_norm=1.0,
-        grad_accum_steps=1, total_steps=30, freeze_backbone=False,
+        learning_rate=3e-3,
+        weight_decay=0.01,
+        projection_lr_mult=1.0,
+        warmup_ratio=0.1,
+        lr_scheduler="cosine",
+        max_grad_norm=1.0,
+        grad_accum_steps=1,
+        total_steps=30,
+        freeze_backbone=False,
     )
     optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
@@ -210,9 +234,10 @@ def test_short_training_run_drives_the_loss_down_without_recompiling():
         labels[:, 1:] = (ids[:, :-1] + 1) % VOCAB
         labels[:, 0] = -100  # nothing precedes the first position
         return to_jax_batch(
-            {"input_ids": ids, "labels": labels,
-             "attention_mask": np.ones_like(ids)},
-            ladder, batch_size=4, pad_token_id=0,
+            {"input_ids": ids, "labels": labels, "attention_mask": np.ones_like(ids)},
+            ladder,
+            batch_size=4,
+            pad_token_id=0,
         )
 
     # Vary the raw length on every step, exactly like the real dataloader does.

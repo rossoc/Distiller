@@ -7,6 +7,7 @@
 #   - a HuggingFace model directory (e.g. <run>/final_model) saved by training
 #   - a Lightning checkpoint file (e.g. <run>/best.ckpt)
 checkpoint_dir: null        # e.g. outputs/final_model  OR  outputs/best.ckpt
+fold: 0                     # fold whose validation split to score (predict_jax)
 
 mode: evaluate               # "evaluate" (test-set scoring) or "generate" (prompts)
 

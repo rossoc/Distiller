@@ -12,22 +12,20 @@ dtype: bf16
 d_model: 512
 num_hidden_layers: 12
 
-# Mamba2 mixer geometry. expand * d_model must be divisible by head_dim.
-state_size: 64
+state_size: 32
 expand: 2
 head_dim: 64
 n_groups: 1
 conv_kernel: 4
+
 chunk_size: 32
 
 initializer_range: 0.02
-
-# Donor-table projection (P/Q) setup — see donor_projection.py.
-projection_init: pca
+projection_init: xavier
 learn_projection_scales: true
-projection_lr_mult: 1.0
+projection_lr_mult: 0.5625759052535996
 projection_cache_dir: outputs/donor_cache
 
 freeze_backbone: false
 gradient_checkpointing: true
-loss_chunk_tokens: 512
+loss_chunk_tokens: 256

@@ -33,7 +33,6 @@ log = logging.getLogger(__name__)
 @hydra.main(
     config_path=str(SRC_DIR / "config"),
     config_name="config",
-    version_base=None,
 )
 def main(cfg: DictConfig) -> None:
     logging.basicConfig(

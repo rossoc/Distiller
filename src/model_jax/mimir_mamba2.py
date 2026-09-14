@@ -82,6 +82,19 @@ def chunked_loss(
     ``jax.checkpoint`` so the ``[chunk, 262144]`` logits are recomputed in
     backward rather than retained — the whole point of chunking.
 
+    The slices are driven through ``jax.lax.scan``, not a Python ``for`` loop:
+    with a full-length batch (e.g. batch=64, seq=256) there can be 200+
+    chunks, and a Python loop traces a *separate* copy of the
+    checkpoint+matmul+softmax subgraph per chunk instead of one subgraph run
+    repeatedly. XLA's rematerialization pass then has an enormous, mostly
+    duplicate HLO graph to schedule and does not reliably free one chunk's
+    ``[chunk, 262144]`` logits before the next chunk's copy is live, so peak
+    memory scales with chunk *count*, not just chunk *size* — confirmed by
+    OOMs that shrank only when ``chunk`` (not ``batch``) shrank. ``scan``
+    compiles the step once and reuses its buffers turn by turn, which is what
+    "process the vocab in bounded-size slices" was supposed to buy in the
+    first place.
+
     **Three branches of the PyTorch version could not survive ``jax.jit``**,
     because all three test traced values:
 
@@ -126,16 +139,19 @@ def chunked_loss(
 
     step = jax.checkpoint(_chunk_cross_entropy, static_argnums=()) if remat else _chunk_cross_entropy
 
-    loss_sum = jnp.zeros((), jnp.float32)
-    n_valid = jnp.zeros((), jnp.int32)
-    for start in range(0, n_chunks * chunk, chunk):
-        chunk_loss, chunk_valid = step(
-            head,
-            flat_hidden[start : start + chunk],
-            flat_labels[start : start + chunk],
-        )
-        loss_sum = loss_sum + chunk_loss
-        n_valid = n_valid + chunk_valid.astype(jnp.int32)
+    hidden_chunks = flat_hidden.reshape(n_chunks, chunk, d_model)
+    label_chunks = flat_labels.reshape(n_chunks, chunk)
+
+    def scan_body(carry, xs):
+        loss_sum, n_valid = carry
+        hidden_slice, labels_slice = xs
+        chunk_loss, chunk_valid = step(head, hidden_slice, labels_slice)
+        return (loss_sum + chunk_loss, n_valid + chunk_valid.astype(jnp.int32)), None
+
+    init = (jnp.zeros((), jnp.float32), jnp.zeros((), jnp.int32))
+    (loss_sum, n_valid), _ = jax.lax.scan(
+        scan_body, init, (hidden_chunks, label_chunks)
+    )
 
     return loss_sum / jnp.maximum(n_valid, 1).astype(jnp.float32)
 

@@ -382,6 +382,18 @@ class DistillerDataModule(L.LightningDataModule):
             kwargs["persistent_workers"] = bool(self.runtime["persistent_workers"])
             if self.runtime["prefetch_factor"] is not None:
                 kwargs["prefetch_factor"] = int(self.runtime["prefetch_factor"])
+            # Torch's default worker start method on Linux is fork(); a
+            # process that has already opened CUDA and gone multithreaded
+            # (train_jax.py, via JAX) forking workers afterward is exactly
+            # the unsafe pattern Python's own RuntimeWarning names. Workers
+            # only tokenize/collate — no JAX/CUDA calls — so switching their
+            # start method to "spawn" avoids inheriting that state at all,
+            # with no change to what they produce. Unset (the torch path's
+            # default) keeps fork, since train.py never opens a conflicting
+            # multithreaded CUDA context in its own process first.
+            mp_context = self.runtime.get("multiprocessing_context")
+            if mp_context:
+                kwargs["multiprocessing_context"] = mp_context
         return DataLoader(dataset, **kwargs)
 
     # ------------------------------------------------------------------

@@ -1,21 +1,17 @@
 # Hydra config group: training
 # Override via: python src/train.py training.learning_rate=5.0e-5
 
-learning_rate: 1.0e-5
-weight_decay: 0.01
-warmup_ratio: 0.03
+learning_rate: 0.0006883131060211034
+weight_decay: 0.0065705784047657085
+warmup_ratio: 0.06095744496605359
 lr_scheduler: cosine
 max_grad_norm: 1.0
 
-# Single training batch size. Eval batch size is derived as
-# eval_batch_multiplier * batch_size (val/test dataloaders keep every sample
-# in a single sequence-length bucket, and forced-long-into-validation rows
-# put max_length-sized sequences in every fold's val set — a 2x multiplier
-# on a model that already fills most of the GPU during training is a common
-# CUDA OOM during validation; lower to 1 (or below) if that happens).
-batch_size: 4
+# batch_size tuned by Optuna (only 64 was in its search space) — also
+# matches this session's own memory-tuning work for the JAX path.
+batch_size: 64
 eval_batch_multiplier: 1
-gradient_accumulation_steps: 4
+gradient_accumulation_steps: 2
 num_train_epochs: 3
 
 logging_steps: 10
