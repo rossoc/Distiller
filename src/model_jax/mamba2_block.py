@@ -43,6 +43,7 @@ Everything in here is shape-static, so it traces once per input shape under
 
 from __future__ import annotations
 
+import functools
 import math
 from dataclasses import dataclass
 from typing import Optional
@@ -50,6 +51,11 @@ from typing import Optional
 import jax
 import jax.numpy as jnp
 from flax import nnx
+
+# jax.checkpoint's `static_argnames` is a no-op on the legacy remat path;
+# mamba2_chunk_scan below relies on it (chunk_size/dt_softplus/dt_limit are
+# passed as keywords, so static_argnums can't reach them either).
+jax.config.update("jax_remat3", True)
 
 
 @dataclass(frozen=True)
@@ -156,21 +162,17 @@ def reshape_into_chunks(x: jnp.ndarray, pad_size: int, chunk_size: int) -> jnp.n
 
 
 def segment_sum(x: jnp.ndarray) -> jnp.ndarray:
-    """Stable segment sum: ``out[..., i, j] = sum(x[..., j+1 : i+1])`` for j <= i.
-
-    Cumulative-sum-and-mask rather than direct subtraction, matching HF's
-    ``segment_sum``. Entries above the diagonal are ``-inf`` so that the
-    ``exp`` the caller applies turns them into exact zeros.
-    """
+    """Lower-triangular cumulative sum"""
     chunk = x.shape[-1]
-    x = jnp.broadcast_to(x[..., None], x.shape + (chunk,))
-    strict = jnp.tril(jnp.ones((chunk, chunk), dtype=bool), k=-1)
-    x = jnp.where(strict, x, 0.0)
-    out = jnp.cumsum(x, axis=-2)
-    lower = jnp.tril(jnp.ones((chunk, chunk), dtype=bool), k=0)
-    return jnp.where(lower, out, -jnp.inf)
+    x_cumsum = jnp.cumsum(x, axis=-1)
+    x_segsum = x_cumsum[..., :, None] - x_cumsum[..., None, :]
+    mask = jnp.tril(jnp.ones((chunk, chunk), dtype=bool))
+    return jnp.where(mask, x_segsum, -jnp.inf)
 
 
+@functools.partial(  # [opt 4] recompute activations on backward rather than storing them
+    jax.checkpoint, static_argnames=("chunk_size", "dt_softplus", "dt_limit")
+)
 def mamba2_chunk_scan(
     hidden_states: jnp.ndarray,  # [b, l, h, p]
     dt: jnp.ndarray,  # [b, l, h]
@@ -178,17 +180,12 @@ def mamba2_chunk_scan(
     B: jnp.ndarray,  # [b, l, g, n]
     C: jnp.ndarray,  # [b, l, g, n]
     chunk_size: int,
-    D: Optional[jnp.ndarray] = None,  # [h]
-    dt_bias: Optional[jnp.ndarray] = None,  # [h]
+    D: jnp.ndarray | None = None,  # [h]
+    dt_bias: jnp.ndarray | None = None,  # [h]
     dt_softplus: bool = False,
     dt_limit: tuple[float, float] = (0.0, float("inf")),
 ) -> jnp.ndarray:
-    """The SSD (state-space duality) chunked scan. Returns ``[b, l, h, p]``.
-
-    A structural port of ``modeling_mamba2.mamba2_chunk_scan``'s fallback body.
-    The four numbered steps below are that function's own comments, kept so the
-    two can be read side by side.
-    """
+    """The SSD (state-space duality) chunked scan. Returns [b, l, h, p]"""
     batch, seq_len, num_heads, head_dim = hidden_states.shape
     num_groups = B.shape[2]
 
@@ -209,7 +206,9 @@ def mamba2_chunk_scan(
     pad_size = (chunk_size - seq_len % chunk_size) % chunk_size
     d_residual = None
     if D is not None:
-        d_residual = D.astype(jnp.float32)[..., None] * pad_by_size(hidden_states, pad_size)
+        d_residual = D.astype(jnp.float32)[..., None] * pad_by_size(
+            hidden_states, pad_size
+        )
 
     # Discretize x and A
     hidden_states = hidden_states * dt[..., None]
@@ -222,31 +221,57 @@ def mamba2_chunk_scan(
     A = jnp.transpose(A, (0, 3, 1, 2))  # [b, h, nc, c]
     a_cumsum = jnp.cumsum(A, axis=-1)
 
-    # 1. Intra-chunk outputs (the diagonal blocks) — the analog of a causal mask
+    # 1. Intra-chunk outputs — [opt 2] fused einsum avoids two [b,nc,c,c,h] intermediates (G, M)
     L = jnp.exp(segment_sum(A))  # [b, h, nc, c, c]
-    G = (C[:, :, :, None, :, :] * B[:, :, None, :, :, :]).sum(axis=-1)  # [b,nc,c,c,h]
-    M = G * jnp.transpose(L, (0, 2, 3, 4, 1))  # [b,nc,c,c,h]
-    y_diag = (M[..., None] * hidden_states[:, :, None]).sum(axis=3)  # [b,nc,c,h,p]
+    y_diag = jnp.einsum(  # [b, nc, c, h, p]
+        "bqihn,bhqij,bqjhn,bqjhp->bqihp",
+        C,
+        L,
+        B,
+        hidden_states,
+        preferred_element_type=jnp.float32,
+    )
 
     # 2. Per-chunk state (right term of the low-rank off-diagonal factorization)
-    decay_states = jnp.exp(a_cumsum[:, :, :, -1:] - a_cumsum)  # [b,h,nc,c]
-    b_decay = B * jnp.transpose(decay_states, (0, 2, 3, 1))[..., None]
-    states = (b_decay[..., None, :] * hidden_states[..., None]).sum(axis=2)  # [b,nc,h,p,n]
+    decay_states = jnp.exp(a_cumsum[:, :, :, -1:] - a_cumsum)  # [b, h, nc, c]
+    b_decay = (
+        B * jnp.transpose(decay_states, (0, 2, 3, 1))[..., None]
+    )  # [b, nc, c, h, n]
+    states = jnp.einsum(  # [b, nc, h, p, n]
+        "bqjhn,bqjhp->bqhpn",
+        b_decay,
+        hidden_states,
+        preferred_element_type=jnp.float32,
+    )
 
-    # 3. Inter-chunk recurrence — correct SSM states at the chunk boundaries
-    previous_states = jnp.zeros_like(states[:, :1])
-    states = jnp.concatenate([previous_states, states], axis=1)
-    padded_tail = jnp.pad(a_cumsum[:, :, :, -1], ((0, 0), (0, 0), (1, 0)))
-    decay_chunk = jnp.transpose(jnp.exp(segment_sum(padded_tail)), (0, 3, 2, 1))
-    new_states = (decay_chunk[..., None, None] * states[:, :, None, ...]).sum(axis=1)
-    states = new_states[:, :-1]
+    # 3. Inter-chunk recurrence — [opt 1] associative scan: O(NC log NC) vs O(NC²)
+    # Each chunk is an affine map h[t] = decay[t]*h[t-1] + state[t].
+    # Two affine maps compose as: (d_b, s_b) ∘ (d_a, s_a) = (d_b*d_a, d_b*s_a + s_b).
+    chunk_decay = jnp.exp(a_cumsum[:, :, :, -1])  # [b, h, nc]
+
+    def compose(a, b):
+        d_a, s_a = a
+        d_b, s_b = b
+        return d_b * d_a, d_b[..., None, None] * s_a + s_b
+
+    decay_scan = jnp.transpose(chunk_decay, (2, 0, 1))  # [nc, b, h]
+    states_scan = jnp.transpose(states, (1, 0, 2, 3, 4))  # [nc, b, h, p, n]
+    _, cumstates = jax.lax.associative_scan(compose, (decay_scan, states_scan))
+    # Shift right: chunk t needs the state accumulated *before* it (chunks 0..t-1)
+    cumstates = jnp.concatenate([jnp.zeros_like(cumstates[:1]), cumstates[:-1]], axis=0)
+    states = jnp.transpose(cumstates, (1, 0, 2, 3, 4))  # [b, nc, h, p, n]
 
     # 4. State -> output per chunk (left term of the factorization)
-    state_decay_out = jnp.exp(a_cumsum)
-    c_times_states = C[..., None, :] * states[:, :, None, ...]
-    y_off = c_times_states.sum(axis=-1) * jnp.transpose(
-        state_decay_out, (0, 2, 3, 1)
-    )[..., None]
+    state_decay_out = jnp.exp(a_cumsum)  # [b, h, nc, c]
+    y_off = (
+        jnp.einsum(  # [b, nc, c, h, p]
+            "bqihn,bqhpn->bqihp",
+            C,
+            states,
+            preferred_element_type=jnp.float32,
+        )
+        * jnp.transpose(state_decay_out, (0, 2, 3, 1))[..., None]
+    )
 
     output = (y_diag + y_off).reshape(batch, -1, num_heads, head_dim)
     if d_residual is not None:
@@ -292,7 +317,9 @@ class MambaRMSNormGated(nnx.Module):
         self.weight = nnx.Param(jnp.ones((hidden_size,), dtype=param_dtype))
         self.eps = eps
 
-    def __call__(self, x: jnp.ndarray, gate: Optional[jnp.ndarray] = None) -> jnp.ndarray:
+    def __call__(
+        self, x: jnp.ndarray, gate: Optional[jnp.ndarray] = None
+    ) -> jnp.ndarray:
         in_dtype = x.dtype
         x = x.astype(jnp.float32)
         if gate is not None:
@@ -329,8 +356,14 @@ class Mamba2Mixer(nnx.Module):
     owns the transposition.
     """
 
-    def __init__(self, cfg: Mamba2Config, layer_idx: int, *, rngs: nnx.Rngs,
-                 param_dtype=jnp.float32):
+    def __init__(
+        self,
+        cfg: Mamba2Config,
+        layer_idx: int,
+        *,
+        rngs: nnx.Rngs,
+        param_dtype=jnp.float32,
+    ):
         self.cfg = cfg
         self.layer_idx = layer_idx
 
@@ -372,22 +405,28 @@ class Mamba2Mixer(nnx.Module):
         )
 
         # S4D-real initialization; these are not discretized.
-        self.A_log = nnx.Param(jnp.log(jnp.arange(1, cfg.num_heads + 1, dtype=jnp.float32)))
+        self.A_log = nnx.Param(
+            jnp.log(jnp.arange(1, cfg.num_heads + 1, dtype=jnp.float32))
+        )
         self.D = nnx.Param(jnp.ones((cfg.num_heads,), jnp.float32))
         self.dt_bias = nnx.Param(_dt_bias_init(k_dt, cfg.num_heads, cfg))
 
-        self.norm = MambaRMSNormGated(inner, eps=cfg.layer_norm_epsilon,
-                                      param_dtype=param_dtype)
+        self.norm = MambaRMSNormGated(
+            inner, eps=cfg.layer_norm_epsilon, param_dtype=param_dtype
+        )
 
         out_bound = 1.0 / math.sqrt(inner)
-        out_w = jax.random.uniform(k_out, (inner, cfg.hidden_size), jnp.float32,
-                                   -out_bound, out_bound)
+        out_w = jax.random.uniform(
+            k_out, (inner, cfg.hidden_size), jnp.float32, -out_bound, out_bound
+        )
         if cfg.rescale_prenorm_residual:
             # GPT-2 residual scaling: 1/sqrt(N) for N residual layers.
             out_w = out_w / math.sqrt(cfg.num_hidden_layers)
         self.out_proj = nnx.Param(out_w)
         self.out_proj_bias = (
-            nnx.Param(jnp.zeros((cfg.hidden_size,), jnp.float32)) if cfg.use_bias else None
+            nnx.Param(jnp.zeros((cfg.hidden_size,), jnp.float32))
+            if cfg.use_bias
+            else None
         )
 
     def __call__(
@@ -413,7 +452,9 @@ class Mamba2Mixer(nnx.Module):
         hidden_states_B_C = jax.nn.silu(self.conv1d(hidden_states_B_C))
 
         # 3. SSM transformation
-        hidden_states_B_C = apply_mask_to_padding_states(hidden_states_B_C, attention_mask)
+        hidden_states_B_C = apply_mask_to_padding_states(
+            hidden_states_B_C, attention_mask
+        )
         gn = cfg.n_groups * cfg.state_size
         x = hidden_states_B_C[..., :inner]
         B = hidden_states_B_C[..., inner : inner + gn]
@@ -445,11 +486,18 @@ class Mamba2Mixer(nnx.Module):
 class Mamba2Block(nnx.Module):
     """Pre-norm residual block: ``h + mixer(norm(h))``."""
 
-    def __init__(self, cfg: Mamba2Config, layer_idx: int, *, rngs: nnx.Rngs,
-                 param_dtype=jnp.float32):
+    def __init__(
+        self,
+        cfg: Mamba2Config,
+        layer_idx: int,
+        *,
+        rngs: nnx.Rngs,
+        param_dtype=jnp.float32,
+    ):
         self.cfg = cfg
-        self.norm = Mamba2RMSNorm(cfg.hidden_size, eps=cfg.layer_norm_epsilon,
-                                  param_dtype=param_dtype)
+        self.norm = Mamba2RMSNorm(
+            cfg.hidden_size, eps=cfg.layer_norm_epsilon, param_dtype=param_dtype
+        )
         self.mixer = Mamba2Mixer(cfg, layer_idx, rngs=rngs, param_dtype=param_dtype)
 
     def __call__(

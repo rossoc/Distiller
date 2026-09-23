@@ -23,7 +23,8 @@ dependencies = [
     # (Variable.get_value(), nnx.List, nnx.to_flat_state, nnx.Optimizer(wrt=),
     # and 0.12's rule that an attribute's data/static status is fixed on first
     # assignment), so it does NOT run on 0.10/0.11.
-    "jax>=0.11.1",              # pulls a matching jaxlib; see the cuda/tpu extras
+    "jax==0.11.1",              # pinned: 0.11.2's hijax API drops HiPrimitive,
+                                # which flax 0.12.9 (latest on PyPI) still needs
     "flax>=0.12.9",
     "optax>=0.2.8",             # optimiser chain in train_jax.build_optimizer
     "orbax-checkpoint>=0.12.4", # CheckpointManager in train_jax

@@ -739,7 +739,7 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.7.2" },
     { name = "hydra-core", specifier = "==1.4.0.dev8" },
     { name = "ipykernel" },
-    { name = "jax", specifier = ">=0.11.1" },
+    { name = "jax", specifier = "==0.11.1" },
     { name = "jax", extras = ["cuda12"], marker = "extra == 'cuda'", specifier = ">=0.11.1" },
     { name = "jax", extras = ["tpu"], marker = "extra == 'tpu'", specifier = ">=0.11.1" },
     { name = "jupytext" },
